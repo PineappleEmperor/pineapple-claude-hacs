@@ -54,6 +54,8 @@ Check the current working directory:
 - `pyrightconfig.json`
 - `README.md`
 - `.gitignore`
+- `images/icon.svg` — placeholder 256×256 icon (replace with PNG before publishing)
+- `images/logo.svg` — placeholder logo, 2:1 ratio, transparent background (replace with PNG before publishing)
 
 **GitHub workflows** — look for existing workflow files in the current project first and replicate the same patterns. If none exist, use standard HA integration CI:
 - `.github/workflows/semantic_release.yml`
@@ -67,6 +69,25 @@ Check the current working directory:
 - `.github/workflows/check-manifest-version.yml`
 - `.github/pr-labeler.yml`
 - `.github/release-drafter.yml`
+
+---
+
+### manifest.json key order
+
+Always `domain` first, `name` second, then remaining keys alphabetically:
+```json
+{
+  "domain": "my_device",
+  "name": "My Device",
+  "codeowners": ["@username"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/username/repo",
+  "iot_class": "local_push",
+  "requirements": [],
+  "version": "0.1.0"
+}
+```
 
 ---
 
@@ -163,5 +184,5 @@ Apply the same patterns and code style as Mode 1.
 1. Run `ruff check custom_components/` — fix all actionable issues; suppress intentional ones with `# noqa` and a reason
 2. Run `python -m pyright custom_components/` — fix all actionable issues
 3. Check `quality_scale.yaml` exists; if not, offer to create it
-4. Check `manifest.json` has correct `documentation` URL pointing to the repo
+4. Check `manifest.json` — correct `documentation` URL pointing to the repo, keys in order (`domain`, `name`, then alphabetical)
 5. Report: files changed · issues fixed · issues intentionally suppressed (with rationale) · remaining manual work
