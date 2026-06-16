@@ -450,16 +450,24 @@ Valid statuses: `done`, `todo`, `exempt` (exempt requires a `comment`).
 
 **How this flows through the repo workflows:**
 
-1. `create-dev-pr.yml` picks the PR title from commits: `feat` (incl. `feat!`) wins over `fix` wins over last commit
-2. `pr-labeler.yml` (release-drafter autolabeler) applies label from PR title on every push — priority: breaking > `feature` > `fix` > `chore`
-3. `release-drafter.yml` maps labels → semver bump: `feature` → minor, `fix`/`chore` → patch, `major`/`xfeat` → major
+1. `create-dev-pr.yml` picks the PR title from commits: `feat` (incl. `feat!`) wins over `fix` wins over last commit. Its label step then detects a breaking `!` first (`grep -qiE '^[a-z]+(\(.+\))?!:'`) → `xfeat`, else maps `feat`→`feature`, `fix`→`fix`, `chore|docs`→`chore`
+2. `pr-labeler.yml` / `release_drafter.yml` autolabeler applies a label from the PR title on every push — priority: breaking (`xfeat`) > `feature` > `fix` > `chore`
+3. `release-drafter.yml` config maps labels → semver bump: `feature` → minor, `fix`/`chore` → patch, `major`/`xfeat`/`xfeature` → major
 4. On tag push (`v*.*.*`), `semantic_release.yml` cuts the GitHub release
 
-⚠️ **Breaking change gap:** the autolabeler in `release-drafter.yml` matches `feat` titles as `feature` (minor), not major — it has no regex for `feat!`. To trigger a major bump, manually add the `major` or `xfeat` label to the PR.
+**Breaking changes (`feat!` / `xfeat`) are captured automatically — required wiring in two places:**
+- **`release-drafter.yml` autolabeler:** a breaking rule **before** the feature rule, matching any type with `!`: `title: ['/^\w+(\(.+\))?!:/']` → label `xfeat` (branches `/^(xfeat|xfeature|breaking)\/.+/`). The `feature`/`fix`/`chore` rules must require a colon, **not** `!` (`/^(feat|feature)(\(.+\))?:/i`), so a `feat!:` title lands in the breaking bucket only, not both. `xfeat`/`xfeature`/`major` are in the `major` `version-resolver` and the 🚨 Breaking Change category (first category wins for display).
+- **`create-dev-pr.yml` label step:** the `if … grep -qiE '^[a-z]+(\(.+\))?!:'` branch above sets `LABEL="xfeat"`; include `xfeat` in the stale-label cleanup loop (`for L in feature fix chore xfeat`) so a downgrade from breaking clears it.
+
+Without both, a `feat!` is silently treated as a minor `feature` — the regex-less `feature` rule swallows the `!`.
+
+⚠️ **Type-vocab gap (don't hand-label around it):** both `create-dev-pr.yml`'s label step and the autolabeler only map `feat|fix|chore|docs`. A commit/PR typed `ci:`, `refactor:`, `build:`, `perf:`, `style:`, `revert:` matches **nothing** → no label → the PR lands in **no** release-drafter category. The fix is the *type*, not a manual `gh` label patch (which masks the gap and is clobbered on the next push): give the headline commit a mapped type (e.g. `chore:` not `ci:` for a workflow tweak). Also: `create-dev-pr.yml` derives the PR title from `feat` > `fix` > **last commit subject** — so when no commit is feat/fix, order the headline commit **last**, or it won't be the title.
 
 **HA `manifest.json` version** must be bumped manually to match the intended release version before merging — `check-manifest-version.yml` enforces that it's been updated.
 
 ⚠️ **Bump discipline (learned the hard way):** before every push to a feature branch, `git fetch origin` **first** (the local `origin/main` ref goes stale as PRs merge — trusting a stale ref means bumping wrongly and the gate failing on the real value), then compare the branch's `manifest.json` version to `origin/main`'s and bump in the same push. Bump level must match the PR's type label (the version-check workflow keys its expected version off the label): `feat`→minor, `fix`/`chore`/`test`→patch. After a PR merges mid-work, the branch sits at the now-merged version → the next push needs a fresh bump.
+
+**Prerelease (rc) cycle:** to ship release candidates while keeping the final target version fixed (e.g. finalize as `v2.0.0` after `rc1`, `rc2`…), carry a **PEP440 prerelease** in the manifest: `2.0.0rc2` — `AwesomeVersion` accepts it (modifier `rc2`, and `2.0.0 > 2.0.0rc2 > …rc1`), and hassfest/HACS validate it. The GitHub release uses the **prerelease flag** (and a `v2.0.0-rc2` tag); the `X.Y.Z` number stays frozen across the cycle. `check-manifest-version.yml` needs two tweaks to cope: (1) the base-version parse regex must tolerate a suffix — anchor `^([0-9]+)\.([0-9]+)\.([0-9]+)` without `$`, since once an rc PR merges the *base* carries `rcN` too; (2) skip the bump-type "incorrect version" suggestion when the PR version is a prerelease (detect `(rc|alpha|beta|a|b|dev)[0-9]*$`) — the "must differ from base" rule still applies, so rc# increments per PR while the target number doesn't move.
 
 ---
 
