@@ -435,6 +435,8 @@ Valid statuses: `done`, `todo`, `exempt` (exempt requires a `comment`).
 
 **Keep messages short.** Tight imperative subject; **subject-only by default**. Add a body ONLY when the *why* is non-obvious, or for breaking changes / migration notes — never to restate what the diff already shows. Long bodies that narrate the change are noise.
 
+**Put the narrative in the release, not the commit.** The human-readable "what changed and why it matters" belongs in the **PR description / release notes** (surfaced by release-drafter / `generate_release_notes`), which is where users actually read it. Keep commits terse; write the detail once, in the release description.
+
 **Types and semver mapping:**
 
 | Type | Semver | Notes |
