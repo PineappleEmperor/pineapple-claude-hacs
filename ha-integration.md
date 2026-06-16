@@ -433,6 +433,8 @@ Valid statuses: `done`, `todo`, `exempt` (exempt requires a `comment`).
 [optional footers — BREAKING CHANGE: <detail>]
 ```
 
+**Keep messages short.** Tight imperative subject; **subject-only by default**. Add a body ONLY when the *why* is non-obvious, or for breaking changes / migration notes — never to restate what the diff already shows. Long bodies that narrate the change are noise.
+
 **Types and semver mapping:**
 
 | Type | Semver | Notes |
