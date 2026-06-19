@@ -52,6 +52,14 @@ Check the current working directory:
 - Additional files as needed: `api.py`, `coordinator.py`, `models.py`, `entity.py`, `helpers.py` (see file structure conventions section)
 
 **Repo root:**
+- `CLAUDE.md` — project instructions. **Always include a rule telling future AI sessions to invoke this `ha-integration` skill before writing/modifying integration code, and to re-invoke after `/compact`** (compaction drops the skill's guidance). Keep this enforcement **per-repo, not global** — a project file is the right scope; do not push a user's global config on others. Suggested snippet:
+  ```markdown
+  ## AI sessions
+  Before writing or modifying integration code (config flow, platforms, manifest,
+  websocket, services…), invoke the `ha-integration` skill. Re-invoke it after any
+  `/compact`, since compaction can drop the skill's guidance from context.
+  ```
+  (A user may *additionally* wire a personal `SessionStart`/`UserPromptSubmit` hook in their own `~/.claude/settings.json`, guarded on `custom_components/*/manifest.json`, to re-arm the rule — but that's a personal convenience; the canonical, shareable enforcement lives in the repo's `CLAUDE.md`.)
 - `hacs.json` — minimal content: `{"name": "My Integration"}` (HACS only strictly requires `name`; add `"homeassistant": "2024.1.0"` for minimum HA version)
 - `pyproject.toml`
 - `pyrightconfig.json`
@@ -89,17 +97,17 @@ The `description`, `issues`, and `topics` checks fail silently until the first `
 
 **GitHub workflows** — look for existing workflow files in the current project first and replicate the same patterns. If none exist, use standard HA integration CI:
 - `.github/workflows/semantic_release.yml` — triggers on `v*.*.*` tag push; uses `softprops/action-gh-release@v2` with `generate_release_notes: true`. Tags containing `beta` auto-marked as prerelease. No npm, no semantic-release tooling needed.
-- `.github/workflows/create-dev-pr.yml` — triggers on every push to non-main branches; auto-creates a draft PR with title from commits (`feat:` wins over `fix:` wins over last commit). Updates PR body with commit list on subsequent pushes. Copy from `~/ha-imap-parcel/.github/workflows/create-dev-pr.yml`. ⚠️ After computing `TITLE`, always add `TITLE=$(echo "$TITLE" | xargs)` before `echo "title=$TITLE" >> $GITHUB_OUTPUT` — GitHub Actions env var interpolation can add surrounding whitespace that breaks `lint_pr.yml` semantic title validation. Do NOT add a `label` job — labeling is handled automatically by `pr-labeler.yml` via `release-drafter` autolabeler, which fires on `opened`, `reopened`, and `synchronize` events. This means the label re-evaluates on every push: if a later commit has a higher conventional-commit type (breaking `!` > `feat` > `fix` > `chore`), the label upgrades automatically.
+- `.github/workflows/create-dev-pr.yml` — triggers on every push to non-main branches; auto-creates a draft PR with **title from commits** (`feat:` wins over `fix:` wins over last commit). Updates PR body with commit list on subsequent pushes. Copy from `~/ha-imap-parcel/.github/workflows/create-dev-pr.yml`. ⚠️ After computing `TITLE`, always add `TITLE=$(echo "$TITLE" | xargs)` before `echo "title=$TITLE" >> $GITHUB_OUTPUT` — GitHub Actions env var interpolation can add surrounding whitespace that breaks `lint_pr.yml` semantic title validation. **Do NOT add a label step here** — labelling is the autolabeler's job (below). Since this sets the title to the winning commit type, autolabelling off the title is effectively commit-driven; a second labeler here just causes flapping.
 - `.github/workflows/release.yml`
-- `.github/workflows/release_drafter.yml` — must include both `push` (main) and `pull_request` triggers; needs `pull-requests: write` permission for autolabeler to apply labels.
-- `.github/workflows/pr-labeler.yml`
+- `.github/workflows/release_drafter.yml` — owns the draft release notes (categories + `version-resolver` + `$BODY`); both `push` (main) and `pull_request` triggers; `pull-requests: write`.
+- `.github/workflows/pr-labeler.yml` — runs `release-drafter/release-drafter/autolabeler@v7` on `pull_request` (opened/reopened/synchronize). The **sole labeler.**
 - `.github/workflows/lint_pr.yml`
 - `.github/workflows/hacs_validate.yml`
 - `.github/workflows/hassfest_validate.yml`
-- `.github/workflows/python_validate.yml`
+- `.github/workflows/python_validate.yml` — **pin the matrix to HA's current minimum Python** (as of 2026-06, `["3.14"]` — HA dev requires 3.14.2+; `pip install homeassistant` refuses older). Test the *floor* HA supports, and re-check it at developers.home-assistant.io/docs/development_environment when HA bumps. Keep this in lockstep with `pyproject.toml` ruff `target-version = "py314"` and pylint `py-version = "3.14"`, and `pyrightconfig.json`.
 - `.github/workflows/check-manifest-version.yml`
 - `.github/pr-labeler.yml`
-- `.github/release-drafter.yml`
+- `.github/release-drafter.yml` — autolabeler rules are **title-only** (no `branch:` rules). The release-drafter autolabeler can only match title/body/branch/files (never commit subjects), so label off the **title** — which `create-dev-pr` already derives from the commits. Keep it the one-and-only labeler; don't also label in `create-dev-pr.yml`.
 
 ---
 
@@ -410,6 +418,16 @@ rules:
 ```
 Valid statuses: `done`, `todo`, `exempt` (exempt requires a `comment`).
 
+**Scaffold `quality_scale.yaml` from the start** (even in Mode 2 on an existing integration that lacks it) and treat it as the definition-of-done — don't discover rules by hitting them. **hassfest gotchas:** the file must list **every** canonical rule with a valid status, `exempt` **must** carry a `comment`, and **only add `"quality_scale": "<tier>"` to `manifest.json` once every rule up to that tier is `done`/`exempt`** — claiming a tier makes hassfest enforce it (a single `todo` at/below that tier fails CI). So: ship the yaml as a tracking ledger first, omit the manifest tier until a tier is fully met.
+
+**Canonical rule set (cached 2026-06; re-verify at developers.home-assistant.io/docs/core/integration-quality-scale/ — rules change).** All must appear in `quality_scale.yaml`:
+- **Bronze:** `action-setup`, `appropriate-polling`, `brands`, `common-modules`, `config-flow-test-coverage`, `config-flow`, `dependency-transparency`, `docs-actions`, `docs-high-level-description`, `docs-installation-instructions`, `docs-removal-instructions`, `entity-event-setup`, `entity-unique-id`, `has-entity-name`, `runtime-data`, `test-before-configure`, `test-before-setup`, `unique-config-entry`
+- **Silver:** `config-entry-unloading`, `log-when-unavailable`, `entity-unavailable`, `action-exceptions`, `reauthentication-flow`, `parallel-updates`, `test-coverage`, `integration-owner`, `docs-installation-parameters`, `docs-configuration-parameters`
+- **Gold:** `entity-translations`, `entity-device-class`, `devices`, `entity-category`, `entity-disabled-by-default`, `discovery`, `stale-devices`, `diagnostics`, `exception-translations`, `icon-translations`, `reconfiguration-flow`, `dynamic-devices`, `discovery-update-info`, `repair-issues`, `docs-use-cases`, `docs-supported-devices`, `docs-supported-functions`, `docs-data-update`, `docs-known-limitations`, `docs-troubleshooting`, `docs-examples`
+- **Platinum:** `async-dependency`, `inject-websession`, `strict-typing`
+
+Common `exempt`s for a local-push MQTT device integration: `appropriate-polling` (push, no polling), `reauthentication-flow` (no integration-level auth), `inject-websession` (no cloud HTTP), `async-dependency` (only sync libs run in executor), `dynamic-devices` (one device per entry).
+
 ---
 
 ### Code style
@@ -450,18 +468,14 @@ Valid statuses: `done`, `todo`, `exempt` (exempt requires a `comment`).
 
 **How this flows through the repo workflows:**
 
-1. `create-dev-pr.yml` picks the PR title from commits: `feat` (incl. `feat!`) wins over `fix` wins over last commit. Its label step then detects a breaking `!` first (`grep -qiE '^[a-z]+(\(.+\))?!:'`) → `xfeat`, else maps `feat`→`feature`, `fix`→`fix`, `chore|docs`→`chore`
-2. `pr-labeler.yml` / `release_drafter.yml` autolabeler applies a label from the PR title on every push — priority: breaking (`xfeat`) > `feature` > `fix` > `chore`
-3. `release-drafter.yml` config maps labels → semver bump: `feature` → minor, `fix`/`chore` → patch, `major`/`xfeat`/`xfeature` → major
+1. `create-dev-pr.yml` sets the PR **title** from the winning commit type (`feat` > `fix` > last commit). It does **no** labelling.
+2. `pr-labeler.yml` runs the **release-drafter autolabeler** — the sole labeler — keyed on the PR **title** (title-only rules; no `branch:`). Since the title is the winning commit type, the label tracks the commits: breaking `type!:` → `xfeat`, `feat|feature:` → `feature`, `fix:` → `fix`, `chore|docs:` → `chore`. The breaking `!` rule must precede `feature` (else `feat!` is swallowed as a minor `feature`).
+3. `release-drafter.yml` config maps labels → semver bump: `feature` → minor, `fix`/`chore` → patch, `major`/`xfeat`/`xfeature` → major.
 4. On tag push (`v*.*.*`), `semantic_release.yml` cuts the GitHub release
 
-**Breaking changes (`feat!` / `xfeat`) are captured automatically — required wiring in two places:**
-- **`release-drafter.yml` autolabeler:** a breaking rule **before** the feature rule, matching any type with `!`: `title: ['/^\w+(\(.+\))?!:/']` → label `xfeat` (branches `/^(xfeat|xfeature|breaking)\/.+/`). The `feature`/`fix`/`chore` rules must require a colon, **not** `!` (`/^(feat|feature)(\(.+\))?:/i`), so a `feat!:` title lands in the breaking bucket only, not both. `xfeat`/`xfeature`/`major` are in the `major` `version-resolver` and the 🚨 Breaking Change category (first category wins for display).
-- **`create-dev-pr.yml` label step:** the `if … grep -qiE '^[a-z]+(\(.+\))?!:'` branch above sets `LABEL="xfeat"`; include `xfeat` in the stale-label cleanup loop (`for L in feature fix chore xfeat`) so a downgrade from breaking clears it.
+⚠️ **One labeler, title-only — don't hand-roll a second one.** The autolabeler can only match title/body/branch/files (never commit subjects). Label off the **title** (which `create-dev-pr` derives from commits) and keep it the *only* labeler. Pitfalls that bit hard: (a) a second label step in `create-dev-pr.yml` **fights** the autolabeler → labels flap (add/remove every push); (b) `branch:` rules flap when the branch name disagrees with the commits (e.g. branch `chore/…`, commits `feat:`) — so use **title-only** rules. Resist re-adding custom bash to "label from commit subjects"; the title already encodes the winning type. (Minor: the autolabeler only *adds*, so if the dominant type changes mid-PR a stale label can linger — the `version-resolver` still takes the highest, and it's rare since a PR is usually one type.)
 
-Without both, a `feat!` is silently treated as a minor `feature` — the regex-less `feature` rule swallows the `!`.
-
-⚠️ **Type-vocab gap (don't hand-label around it):** both `create-dev-pr.yml`'s label step and the autolabeler only map `feat|fix|chore|docs`. A commit/PR typed `ci:`, `refactor:`, `build:`, `perf:`, `style:`, `revert:` matches **nothing** → no label → the PR lands in **no** release-drafter category. The fix is the *type*, not a manual `gh` label patch (which masks the gap and is clobbered on the next push): give the headline commit a mapped type (e.g. `chore:` not `ci:` for a workflow tweak). Also: `create-dev-pr.yml` derives the PR title from `feat` > `fix` > **last commit subject** — so when no commit is feat/fix, order the headline commit **last**, or it won't be the title.
+⚠️ **Type-vocab gap:** the autolabeler title rules map only `feat|fix|chore|docs` (+ `!` → `xfeat`). A title typed `ci:`, `refactor:`, `build:`, `perf:`, `style:`, `revert:` matches **nothing** → no label → no release-drafter category. Since `create-dev-pr` picks the title as `feat` > `fix` > last commit, ensure at least one commit is a mapped type (e.g. `chore:` not `ci:` for a workflow-only PR) so the title lands on something labellable. Don't hand-patch the label (clobbered next push).
 
 **HA `manifest.json` version** must be bumped manually to match the intended release version before merging — `check-manifest-version.yml` enforces that it's been updated.
 
@@ -471,11 +485,16 @@ Without both, a `feat!` is silently treated as a minor `feature` — the regex-l
 - **rc numbers track *published* candidates, not PRs.** You only increment `rc1`→`rc2` when you actually cut a new published rc; you do **not** invent `rc2`/`rc3` per-PR to satisfy the gate. The version stays frozen at the current rc across iteration; it changes only as the pre-merge bump to the version being published.
 - **A prerelease deliberately changes gate behaviour:** a prerelease version only needs to *differ from base* — so the gate must **skip** the label-derived "incorrect version" suggestion when the PR version matches `(rc|alpha|beta|a|b|dev)[0-9]*$` (otherwise a `feature`-labelled `2.0.0rc1` PR fails, demanding `v2.1.0`). Also de-anchor the base parse (`^([0-9]+)\.([0-9]+)\.([0-9]+)` without `$`) so a base that already carries `rcN` still parses. This is the *only* prerelease gate change needed — do **not** add per-PR rc-increment logic or relax the "differ from base" rule.
 
+> ⚠️ **Orphaned-branch trap (the dev-PR auto-merges fast — this WILL bite repeatedly).** `create-dev-pr.yml` opens a draft PR that gets merged to `main` as soon as it's approved/auto-merged. **Any commit you push to `feat/rcN` after that merge is stranded** — it's not on `main` and not in the release, even though `git status` on the branch looks fine. It also leaves the branch's manifest equal to `main`'s, so `check-manifest-version` fails. **Guard every time, not just when you remember:**
+> 1. At the **start** of any rc work and before claiming work is "pushed/live", run `git fetch origin` then `git log --oneline origin/main..feat/rcN`. If `main` already contains a merge of this branch, the branch is spent.
+> 2. When a cycle has merged/released: **branch fresh** `git checkout -b feat/rc(N+1) origin/main`, `git cherry-pick` the orphaned commits (oldest-first), bump `manifest.json` to the next `rcN` **and** `ENGINE_VERSION` (firmware/version.py + the integration's mirror) if any firmware changed, run the sync + guards, push, then delete the merged branch (local + remote).
+> 3. Don't keep committing onto a `feat/rcN` whose PR has merged — start the next branch immediately after a release.
+
 ---
 
 ### ⚠️ GITHUB_TOKEN suppresses workflow events on auto-created PRs
 
-The biggest CI footgun: **a PR opened/updated by a workflow using the default `secrets.GITHUB_TOKEN` does NOT emit `pull_request` events** (GitHub's anti-recursion rule). So every `pull_request`-triggered workflow — `pr-labeler.yml`, `hassfest_validate.yml`, `check-manifest-version.yml`, etc. — **silently never runs** on the dev PRs that `create-dev-pr.yml` creates. Symptoms: labels never applied, version bumps never enforced, validations skipped until a human pushes/reopens.
+The biggest CI footgun: **a PR opened/updated by a workflow using the default `secrets.GITHUB_TOKEN` does NOT emit `pull_request` events** (GitHub's anti-recursion rule). So every `pull_request`-triggered workflow — `hassfest_validate.yml`, `check-manifest-version.yml`, etc. — **silently never runs** on the dev PRs that `create-dev-pr.yml` creates. Symptoms: version bumps never enforced, validations skipped until a human pushes/reopens. (This is also why labelling lives *inside* `create-dev-pr.yml` rather than a separate `pull_request`-triggered labeler — it runs on the push that creates/updates the PR.)
 
 Two fixes:
 - **Proper fix:** create the dev PR with a **PAT** (personal access token secret) instead of `GITHUB_TOKEN` — PAT-authored PRs do emit events, so all downstream `pull_request` workflows run normally. Costs a long-lived secret to manage.
@@ -484,7 +503,7 @@ Two fixes:
 **`create-dev-pr.yml` hardening** (prevents duplicate/stale PRs seen in practice):
 - Add `concurrency: {group: dev-pr-${{ github.ref }}, cancel-in-progress: true}` so rapid pushes can't race into two PRs.
 - Skip PR creation when the branch has **0 commits ahead of main** (`git rev-list --count origin/main..HEAD`) — otherwise pushing to an already-merged branch re-spawns a PR.
-- On update, re-set the **title** (`gh pr edit --title`) and **replace** stale type labels (remove `feature`/`fix`/`chore`, add the current one) — `gh pr edit --add-label` only adds, so a PR keeps a stale `feature` label/title after its commits change to fixes, making the version check demand the wrong bump.
+- On update, re-set the **title** (`gh pr edit --title`) to the current winning commit type — the autolabeler re-labels from the new title on the next `synchronize`. (Don't manage labels in this workflow; that's the autolabeler's job.)
 
 ---
 
