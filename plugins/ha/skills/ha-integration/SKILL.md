@@ -500,13 +500,18 @@ Common `exempt`s for a local-push MQTT device integration: `appropriate-polling`
 
 ---
 
-### ⚠️ GITHUB_TOKEN suppresses workflow events on auto-created PRs
+### ⚠️ GITHUB_TOKEN suppresses workflows ONLY on the bot's `opened` event — `synchronize` from a human push still fires
 
-The biggest CI footgun: **a PR opened/updated by a workflow using the default `secrets.GITHUB_TOKEN` does NOT emit `pull_request` events** (GitHub's anti-recursion rule). So every `pull_request`-triggered workflow — `hassfest_validate.yml`, `check-manifest-version.yml`, etc. — **silently never runs** on the dev PRs that `create-dev-pr.yml` creates. Symptoms: version bumps never enforced, validations skipped until a human pushes/reopens. (This is also why labelling lives *inside* `create-dev-pr.yml` rather than a separate `pull_request`-triggered labeler — it runs on the push that creates/updates the PR.)
+Narrow, often-misunderstood footgun: **the `pull_request: opened` event from a PR that `create-dev-pr.yml` opens with the default `secrets.GITHUB_TOKEN` is suppressed** (GitHub's anti-recursion rule — events caused by `GITHUB_TOKEN` don't trigger new runs). So `pull_request`-triggered workflows (`lint_pr`, `pr-labeler`, autolabeler, `check-manifest-version`'s PR part) **do not run on that first auto-open**.
 
-Two fixes:
-- **Proper fix:** create the dev PR with a **PAT** (personal access token secret) instead of `GITHUB_TOKEN` — PAT-authored PRs do emit events, so all downstream `pull_request` workflows run normally. Costs a long-lived secret to manage.
-- **No-secret fix:** add a `push:` trigger (`branches-ignore: [main]`) to each check so it runs on the branch push (always fires, regardless of how the PR was made). Default the base ref to `main` when there's no PR context, and guard PR-only steps with `if: github.event_name == 'pull_request'` (e.g. label lookups, PR comments). This is what made `check-manifest-version` actually enforce.
+**But it stops there.** Every *later* push you make to the branch fires a `pull_request: synchronize` event whose `triggering_actor` is **you** (your SSH push), not the token — so all those workflows run normally from the second push on. Verified empirically: on a bot-authored dev PR (author `github-actions[bot]`, no PAT, empty secret list), `lint_pr` / `pr-labeler` / autolabeler / manifest-check all ran and passed, every one with `triggering_actor` = the human, because the branch had several pushes. The suppression swallows exactly **one** event — the bot's `opened`.
+
+**Practical upshot:** with **no PAT**, a branch pushed **more than once** (i.e. nearly always) gets full automation — the auto-PR opens, and your next push triggers all checks. The footgun only bites a branch pushed **exactly once** then merged untouched. Don't reach for a PAT reflexively; it's rarely needed.
+
+Fixes, in order of preference:
+- **Usually nothing** — push more than once (you will anyway) and `synchronize` covers it. This is what the reference repos actually rely on (no PAT in any of them).
+- **No-secret hardening for the must-always-enforce gate:** add a `push:` trigger (`branches-ignore: [main]`) to `check-manifest-version` so the version gate runs on the branch push regardless of PR events — covers even the single-push case. Default the base ref to `main` when there's no PR context (`${{ github.event.pull_request.base.ref || 'main' }}`) and guard PR-only steps with `if: github.event_name == 'pull_request'` (label lookups, PR comments).
+- **PAT (only if you truly need single-push auto-PRs fully checked):** open the dev PR with a fine-grained, repo-scoped PAT (`Pull requests: write` + `Contents: read`, short expiry) instead of `GITHUB_TOKEN` — PAT-authored events aren't suppressed, so even the `opened` fires everything. Costs a secret to rotate; reserve for when single-push branches matter.
 
 **`create-dev-pr.yml` hardening** (prevents duplicate/stale PRs seen in practice):
 - Add `concurrency: {group: dev-pr-${{ github.ref }}, cancel-in-progress: true}` so rapid pushes can't race into two PRs.
