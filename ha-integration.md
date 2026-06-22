@@ -509,24 +509,8 @@ Two fixes:
 
 ## Debugging discipline
 
-**Trace the code before naming a root cause.** Don't assert *why* a bug happens from a plausible
-story — grep the actual path and confirm. For a device/targeting bug that means following all three
-hops: where it's **published** (topic/service payload), where it's **subscribed/handled**, and what
-the **handler** does with the target. State a cause only once the code shows it; if you must
-hypothesise first, label it explicitly as an unverified guess, never as the diagnosis. A confident
-wrong root cause on hardware the user can't easily re-check wastes their time and burns trust.
-
-> Example that bit: "one device's *Install* button OTA-updated **all** devices." The tempting story
-> was "the devices share an id." Wrong — the real cause was code: the `update` entity's
-> `async_install` called a domain service (`push_firmware`) with **no target**, and the handler did
-> `for entry in hass.config_entries.async_entries(DOMAIN)` — looping **every** config entry. The
-> device ids were irrelevant; the loop ignored them.
-
-**Reusable HA gotcha from that:** a `hass.services.async_call(DOMAIN, svc, …)` with no device/entry in
-the payload hits a handler that, by HA convention, fans out across **all** config entries. So an
-**entity action that should affect only its own device must pass its own target** (e.g.
-`{"entry_id": self._entry.entry_id}` or a `device_id`), and the handler must filter to it — defaulting
-to "all" only for a deliberate bulk/admin call. Audit every multi-entry service the same way.
+- **Trace before naming a cause** — grep the path (publish → subscribe → handler), confirm in code; a pre-trace hunch is a guess, not the diagnosis.
+- **Multi-entry service fan-out:** a `hass.services.async_call(DOMAIN, svc, …)` with no target loops **all** config entries. An entity action that should hit only its own device must pass its own `entry_id`/`device_id` and the handler must filter — default to "all" only for a deliberate bulk call.
 
 ---
 
