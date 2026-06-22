@@ -1,0 +1,14 @@
+{
+  "name": "pineapple-claude-hacs",
+  "owner": {
+    "name": "PineappleEmperor"
+  },
+  "plugins": [
+    {
+      "name": "ha",
+      "source": "./plugins/ha",
+      "description": "Home Assistant integration + custom panel skills (ha-integration, ha-panel-design).",
+      "version": "1.0.0"
+    }
+  ]
+}

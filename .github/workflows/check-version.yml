@@ -1,0 +1,168 @@
+name: Check Version Bump
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write  # Required to comment on PRs
+
+env:
+  PLUGIN_MANIFEST: plugins/ha/.claude-plugin/plugin.json
+  MARKETPLACE: .claude-plugin/marketplace.json
+  PLUGIN_NAME: ha
+
+jobs:
+  check_version_bump:
+    name: Ensure plugin version is bumped and in sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get base branch
+        run: echo "BASE_REF=${{ github.event.pull_request.base.ref || 'main' }}" >> $GITHUB_ENV
+
+      - name: Plugin and marketplace versions must be in sync
+        run: |
+          PLUGIN_VERSION=$(jq -r '.version' "$PLUGIN_MANIFEST")
+          MP_VERSION=$(jq -r --arg n "$PLUGIN_NAME" '.plugins[] | select(.name==$n) | .version' "$MARKETPLACE")
+          echo "plugin.json: $PLUGIN_VERSION   marketplace.json: $MP_VERSION"
+          if [ "$PLUGIN_VERSION" != "$MP_VERSION" ]; then
+            echo "❌ Version mismatch: plugin.json ($PLUGIN_VERSION) != marketplace.json ($MP_VERSION). Bump both together."
+            exit 1
+          fi
+          echo "✅ versions in sync"
+
+      - name: Checkout base manifest
+        run: |
+          git fetch origin $BASE_REF
+          git show origin/$BASE_REF:$PLUGIN_MANIFEST > ../plugin_base.json
+
+      - name: Compare versions
+        id: compare
+        run: |
+          BASE_VERSION=$(jq -r '.version' ../plugin_base.json)
+          PR_VERSION=$(jq -r '.version' "$PLUGIN_MANIFEST")
+
+          echo "Base version: $BASE_VERSION"
+          echo "PR version: $PR_VERSION"
+
+          if [ "$BASE_VERSION" == "$PR_VERSION" ]; then
+            echo "unchanged=true" >> $GITHUB_OUTPUT
+          else
+            echo "unchanged=false" >> $GITHUB_OUTPUT
+          fi
+          echo "base_version=$BASE_VERSION" >> $GITHUB_OUTPUT
+          echo "pr_version=$PR_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Determine bump type from PR labels
+        id: bump
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LABELS=$(gh pr view ${{ github.event.pull_request.number }} --json labels -q '.labels[].name')
+          BASE_VERSION="${{ steps.compare.outputs.base_version }}"
+
+          # Extract X.Y.Z, tolerating a prerelease suffix (e.g. 2.0.0rc1) on the base.
+          if [[ "$BASE_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+            MAJOR="${BASH_REMATCH[1]}"; MINOR="${BASH_REMATCH[2]}"; PATCH="${BASH_REMATCH[3]}"
+          else
+            echo "❌ Could not parse version number: $BASE_VERSION"; exit 1
+          fi
+
+          # A prerelease PR version (rc/a/b/alpha/beta/dev) is a deliberate frozen
+          # pre-release; it only needs to differ from base, so skip bump suggestion.
+          PR_VERSION="${{ steps.compare.outputs.pr_version }}"
+          if [[ "$PR_VERSION" =~ (rc|alpha|beta|a|b|dev)[0-9]*$ ]]; then
+            echo "PR_IS_PRERELEASE=true" >> $GITHUB_OUTPUT
+          else
+            echo "PR_IS_PRERELEASE=false" >> $GITHUB_OUTPUT
+          fi
+
+          if echo "$LABELS" | grep -qiE 'xfeat|xfeature|major'; then
+            BUMP="xfeature"
+          elif echo "$LABELS" | grep -qiE 'feat|feature'; then
+            BUMP="feature"
+          elif echo "$LABELS" | grep -qiE 'fix|patch|chore'; then
+            BUMP="fix"
+          else
+            BUMP="none"
+          fi
+
+          if [ "$BUMP" = "xfeature" ]; then
+            EXPECTED_VERSION="v$((MAJOR+1)).0.0"
+          elif [ "$BUMP" = "feature" ]; then
+            EXPECTED_VERSION="v$MAJOR.$((MINOR+1)).0"
+          elif [ "$BUMP" = "fix" ]; then
+            EXPECTED_VERSION="v$MAJOR.$MINOR.$((PATCH+1))"
+          else
+            EXPECTED_VERSION=""
+          fi
+
+          echo "RECOMMENDED_BUMP=$BUMP" >> $GITHUB_OUTPUT
+          echo "SUGGESTED_VERSION=$EXPECTED_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Comment on PR if version unchanged
+        if: github.event_name == 'pull_request' && steps.compare.outputs.unchanged == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BUMP_TYPE="${{ steps.bump.outputs.RECOMMENDED_BUMP }}"
+          NEW_VERSION="${{ steps.bump.outputs.SUGGESTED_VERSION }}"
+          MSG="<!-- version-check -->
+          ⚠️ **Version in \`$PLUGIN_MANIFEST\` has not been updated.**
+
+          Please update the \`version\` field (and the matching \`$PLUGIN_NAME\` entry in \`$MARKETPLACE\`) per [Semantic Versioning](https://semver.org/)."
+          if [ "$BUMP_TYPE" != "none" ]; then
+            MSG+="
+
+          🔍 Based on the PR labels, a **$BUMP_TYPE** bump is recommended.
+          💡 Suggested new version: \`$NEW_VERSION\`"
+          else
+            MSG+="
+
+          💡 No \`feature\`/\`fix\`/\`chore\` label found — add one to indicate the change type."
+          fi
+
+          COMMENT_ID=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            --jq '.[] | select(.body | contains("<!-- version-check -->")) | select(.user.type == "Bot") | .id')
+          if [ -n "$COMMENT_ID" ]; then
+            gh api --method PATCH -H "Accept: application/vnd.github+json" \
+              /repos/${{ github.repository }}/issues/comments/$COMMENT_ID -f body="$MSG"
+          else
+            gh pr comment ${{ github.event.pull_request.number }} --body "$MSG"
+          fi
+          echo "❌ Version unchanged — failing the workflow"
+          exit 1
+
+      - name: Comment if version number is incorrect
+        if: github.event_name == 'pull_request' && steps.bump.outputs.PR_IS_PRERELEASE != 'true' && steps.bump.outputs.RECOMMENDED_BUMP != 'none' && steps.bump.outputs.SUGGESTED_VERSION != format('v{0}', steps.compare.outputs.pr_version)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BUMP_TYPE="${{ steps.bump.outputs.RECOMMENDED_BUMP }}"
+          NEW_VERSION="${{ steps.bump.outputs.SUGGESTED_VERSION }}"
+          MSG="<!-- version-check -->
+          ⚠️ **Version in \`$PLUGIN_MANIFEST\` seems incorrect.**
+
+          🔍 Based on the PR labels, a **$BUMP_TYPE** bump is recommended.
+          💡 Suggested new version: \`$NEW_VERSION\`"
+
+          COMMENT_ID=$(gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments \
+            --jq '.[] | select(.body | contains("<!-- version-check -->")) | select(.user.type == "Bot") | .id')
+          if [ -n "$COMMENT_ID" ]; then
+            gh api --method PATCH -H "Accept: application/vnd.github+json" \
+              /repos/${{ github.repository }}/issues/comments/$COMMENT_ID -f body="$MSG"
+          else
+            gh pr comment ${{ github.event.pull_request.number }} --body "$MSG"
+          fi
+          echo "❌ Version mismatch — failing the workflow"
+          exit 1

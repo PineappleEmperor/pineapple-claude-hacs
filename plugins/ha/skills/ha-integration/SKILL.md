@@ -1,3 +1,7 @@
+---
+description: Create, modify, and lint Home Assistant custom integrations — custom_components packages, manifest.json, config/options/reauth/reconfigure flows, coordinator + entity platforms, services, diagnostics, quality_scale.yaml — targeting Platinum quality scale. Use before writing or modifying any HA integration code; re-invoke after /compact.
+---
+
 # Home Assistant Integration Assistant
 
 Help create, modify, and lint Home Assistant custom integrations targeting **platinum quality scale**.
@@ -63,7 +67,11 @@ Check the current working directory:
 - `hacs.json` — minimal content: `{"name": "My Integration"}` (HACS only strictly requires `name`; add `"homeassistant": "2024.1.0"` for minimum HA version)
 - `pyproject.toml`
 - `pyrightconfig.json`
-- `README.md`
+- `README.md` — **include the AI-assistance disclaimer** as a GitHub `> [!NOTE]` admonition box. Link the skill name to its public repo. Template:
+  ```markdown
+  > [!NOTE]
+  > **AI assistance:** I'm a programmer; this project is built with AI (Claude, via Claude Code) for implementation, code review, and QA — under human direction, guided by my [`ha-integration`](https://github.com/PineappleEmperor/pineapple-claude-hacs) skill. We challenge each other's choices: I review and push back on the AI's output, and it questions my decisions and flags trade-offs. Architecture and final review are mine; every change is human-reviewed before it merges.
+  ```
 - `.gitignore`
 - `custom_components/{domain}/brand/icon.svg` — placeholder 256×256 icon (source)
 - `custom_components/{domain}/brand/logo.svg` — placeholder logo, 2:1 ratio, transparent background (source)

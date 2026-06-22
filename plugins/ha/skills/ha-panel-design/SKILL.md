@@ -1,3 +1,7 @@
+---
+description: Size, type, spacing, and colour for Home Assistant custom panels (Lit/TS web components served by an integration). Material 3 type scale, 48px touch targets, HA theme CSS custom properties — tokens over hardcoded literals. Use before changing any panel CSS/markup; re-invoke after /compact.
+---
+
 # HA Custom Panel Design
 
 Size, type, spacing, and colour for **Home Assistant custom panels** (Lit/TS web components

@@ -1,0 +1,60 @@
+name: Validate manifests
+
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate marketplace + plugin manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate JSON + plugin structure
+        run: |
+          python3 - <<'PY'
+          import json, sys, pathlib
+          root = pathlib.Path('.')
+          errs: list[str] = []
+
+          mp_path = root / '.claude-plugin' / 'marketplace.json'
+          mp = json.loads(mp_path.read_text())
+          for f in ('name', 'owner', 'plugins'):
+              if f not in mp:
+                  errs.append(f'marketplace.json missing required field {f!r}')
+
+          for p in mp.get('plugins', []):
+              if 'name' not in p or 'source' not in p:
+                  errs.append(f'plugin entry missing name/source: {p}')
+                  continue
+              name, src = p['name'], p['source']
+              if not isinstance(src, str):
+                  continue  # remote sources (github/url) not checked here
+              if not src.startswith('./'):
+                  errs.append(f"{name}: relative source must start with './'")
+                  continue
+              pdir = root / src
+              pj = pdir / '.claude-plugin' / 'plugin.json'
+              if not pj.exists():
+                  errs.append(f'{name}: missing {pj}')
+                  continue
+              data = json.loads(pj.read_text())
+              if data.get('name') != name:
+                  errs.append(f"{name}: plugin.json name {data.get('name')!r} != marketplace entry name")
+              skills = pdir / 'skills'
+              if skills.is_dir():
+                  for sd in skills.iterdir():
+                      if sd.is_dir() and not (sd / 'SKILL.md').exists():
+                          errs.append(f'{sd}: skill directory missing SKILL.md')
+
+          if errs:
+              print('\n'.join('❌ ' + e for e in errs))
+              sys.exit(1)
+          print('✅ manifests valid')
+          PY
