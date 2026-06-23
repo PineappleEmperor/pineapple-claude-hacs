@@ -155,6 +155,7 @@ Always `domain` first, `name` second, then remaining keys alphabetically:
   - Raise `ConfigEntryNotReady` for transient failures (device offline, timeout, network error)
   - Raise `ConfigEntryAuthFailed` for invalid/expired credentials
 - `async_unload_entry`: call `async_unload_platforms`; `entry.runtime_data` cleaned up automatically
+- `async_remove_config_entry_device(hass, entry, device_entry) -> bool` — **implement it if the integration creates any device.** HA only shows the device **Delete** button when this handler exists; without it users are stuck with the device. Return `True` to allow deletion (or `False` to block while the device is still live). This is the Gold `stale-devices` rule — **do not `exempt` `stale-devices` just because there's a single static device**; a created device still needs a removal path, so it's `done` (via this handler), not `exempt`. Keep `quality_scale.yaml` honest: an optimistic `exempt` hides a real gap.
 - Include `"notify"` in `PLATFORMS` — loaded via `async_forward_entry_setups` like any other platform
 
 **Notify platform (modern pattern — HA 2023.8+)**
