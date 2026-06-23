@@ -116,6 +116,7 @@ The `description`, `issues`, and `topics` checks fail silently until the first `
 - `.github/workflows/check-manifest-version.yml`
 - `.github/pr-labeler.yml`
 - `.github/release-drafter.yml` — autolabeler rules are **title-only** (no `branch:` rules). The release-drafter autolabeler can only match title/body/branch/files (never commit subjects), so label off the **title** — which `create-dev-pr` already derives from the commits. Keep it the one-and-only labeler; don't also label in `create-dev-pr.yml`.
+- `.github/dependabot.yml` — see the **Dependabot** section below.
 
 ---
 
@@ -154,7 +155,7 @@ Always `domain` first, `name` second, then remaining keys alphabetically:
   - Call `await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)`
   - Raise `ConfigEntryNotReady` for transient failures (device offline, timeout, network error)
   - Raise `ConfigEntryAuthFailed` for invalid/expired credentials
-- `async_unload_entry`: call `async_unload_platforms`; `entry.runtime_data` cleaned up automatically
+- `async_unload_entry`: call `async_unload_platforms`; `entry.runtime_data` cleaned up automatically. **Also `await coordinator.async_shutdown()` when the unload succeeds** — `async_unload_platforms` removes entities but does **not** stop the coordinator's `update_interval` timer or its request-refresh **debouncer**, which then linger across unload/reload (and fail pytest's `verify_cleanup` with "Lingering timer"). Shutting down is correct on reload too (a fresh coordinator is built in the next `async_setup_entry`).
 - `async_remove_config_entry_device(hass, entry, device_entry) -> bool` — **implement it if the integration creates any device.** HA only shows the device **Delete** button when this handler exists; without it users are stuck with the device. Return `True` to allow deletion (or `False` to block while the device is still live). This is the Gold `stale-devices` rule — **do not `exempt` `stale-devices` just because there's a single static device**; a created device still needs a removal path, so it's `done` (via this handler), not `exempt`. Keep `quality_scale.yaml` honest: an optimistic `exempt` hides a real gap.
 - Include `"notify"` in `PLATFORMS` — loaded via `async_forward_entry_setups` like any other platform
 
@@ -236,7 +237,8 @@ This creates `notify.{device_id}` (e.g. `notify.pimoroni_unicorn_studio`) with f
 - Prefer `_attr_*` class/instance attributes over property methods for static values — only use properties for dynamic/state-dependent values
 - Implement `_attr_available` to reflect device reachability
 - Read state from `self.coordinator.data` only — never do I/O in properties
-- Don't pass `update_before_add=True` to `async_add_entities` — coordinator handles updates
+- Don't pass `update_before_add=True` to `async_add_entities`. It papers over a real gap and schedules a refresh **debouncer timer** that lingers in tests and frozen-clock runs. The gap: `CoordinatorEntity` does **not** push initial state on add, so a push-style entity (one that sets `_attr_native_value` inside `_handle_coordinator_update`) reads `unknown` until the next poll. Fix it properly — either compute `native_value` as a **property** off `self.coordinator.data` (always current), or call `self._handle_coordinator_update()` at the end of `async_added_to_hass` (after `await super().async_added_to_hass()`) to populate from the already-loaded coordinator data. `first_refresh` runs before entities are added, so the data is there.
+- **A list/collection sensor's state should be the `len()` count, with the items in an attribute** — not a timestamp or the raw list. (`last_updated`/`last_changed` are already built-in state attributes; don't re-add them.) Add `_attr_state_class = MEASUREMENT` so the count graphs.
 
 **`EntityDescription` pattern** — preferred when an integration exposes many similar entities:
 ```python
@@ -417,6 +419,12 @@ The most dangerous test is the one that passes while the integration is broken. 
 
 **Minimum coverage before claiming a tier:** config-flow (happy path + each error + reauth/reconfigure), a real setup-entry `LOADED` test, coordinator success + auth-failure + the credential-read path against a mocked transport, unload, and a unit test per parser. Wire the regression test *first* on any bug fix: confirm it fails on the unpatched code, then fix.
 
+**Prefer future-dated fixtures over freezing the clock.** For an end-to-end test that feeds a real captured payload (e.g. an `.eml`) through the mocked transport and asserts a sensor populates: if the payload has dates that must be "upcoming" for the integration to surface them, **shift the fixture's dates forward at runtime** (parse + rewrite, or template) rather than `freeze_time(...)`. Freezing the clock breaks anything that depends on the loop's time — most painfully it stops the **debouncer** that an `update_before_add` refresh relies on, so the entity never populates (state stays `unknown`), *and* it leaves a timer scheduled at the frozen wall-clock time that fails teardown. A live clock with future-dated data sidesteps both and keeps the fixture's real bytes/encoding.
+
+**Push coordinator data to entities without scheduling timers.** In a setup test, after `async_setup` + `async_block_till_done`, the entities may still read defaults (the on-add refresh is debounced and won't fire within `block_till_done`). Call `coordinator.async_update_listeners()` to notify entities from the **already-loaded** `coordinator.data` synchronously — unlike `async_refresh()` it schedules no new timer, so teardown stays clean. (The real fix for production is the `async_added_to_hass` initial-state population above; the test then needs no nudge at all.)
+
+**Standalone helper scripts** (e.g. a `scripts/foo.py` CI tool) trip `T201` (print) and `INP001` (implicit namespace package) — add `"scripts/*" = ["T20", "INP001"]` to ruff `per-file-ignores`. Tests legitimately reach into private members; HA core ignores `SLF001` under `tests/` — mirror that (`"tests/**" = [..., "SLF001"]`). And `result["type"]`/`["errors"]`/`["reason"]` on a flow `ConfigFlowResult` are `reportTypedDictNotRequiredAccess` under pyright — use `result.get("type")` etc. in tests.
+
 ---
 
 ### Quality scale — target Platinum
@@ -484,6 +492,8 @@ Common `exempt`s for a local-push MQTT device integration: `appropriate-polling`
 
 **Match release-drafter when writing the PR body.** If `change-template` includes `$BODY`, the PR description is inlined **under** its category heading (e.g. `### 🚀 Features`). So the body must nest cleanly: use **bold emoji sub-heads** (`**🧩 Engine**`), not `#`/`##` — top-level headings render bigger than the category and clash. Mirror the config's emoji category style, and label the PR so it lands in the intended category (e.g. a `major`/`xfeature` label → 🚨 Breaking Change). Note release-drafter draws the PR body via the GraphQL path; `gh pr edit` can fail on the Projects-classic deprecation — set title/body via `gh api -X PATCH repos/{o}/{r}/pulls/{n} -f title=… -F body=@file` instead.
 
+> ⚠️ **Once Dependabot is enabled, drop `$BODY` from `change-template`.** Dependabot PR bodies carry compatibility tables, a "Dependabot is rebasing this PR" notice, and `//: # (dependabot-start)` HTML markers — all of which `$BODY` dumps straight into the release notes. release-drafter can't strip the body per-PR, so use a title-only template: `change-template: '- $TITLE @$AUTHOR (#$NUMBER)'`. Human PR bodies are just the `create-dev-pr` commit list anyway, so little is lost; add narrative by editing the draft before publishing. (This supersedes the "nest your PR body under the category" advice above — it only mattered while `$BODY` was in the template.)
+
 **Types and semver mapping:**
 
 | Type | Semver | Notes |
@@ -512,6 +522,10 @@ Common `exempt`s for a local-push MQTT device integration: `appropriate-polling`
 - **rc numbers track *published* candidates, not PRs.** You only increment `rc1`→`rc2` when you actually cut a new published rc; you do **not** invent `rc2`/`rc3` per-PR to satisfy the gate. The version stays frozen at the current rc across iteration; it changes only as the pre-merge bump to the version being published.
 - **A prerelease deliberately changes gate behaviour:** a prerelease version only needs to *differ from base* — so the gate must **skip** the label-derived "incorrect version" suggestion when the PR version matches `(rc|alpha|beta|a|b|dev)[0-9]*$` (otherwise a `feature`-labelled `2.0.0rc1` PR fails, demanding `v2.1.0`). Also de-anchor the base parse (`^([0-9]+)\.([0-9]+)\.([0-9]+)` without `$`) so a base that already carries `rcN` still parses. This is the *only* prerelease gate change needed — do **not** add per-PR rc-increment logic or relax the "differ from base" rule.
 
+**Compare the gate against the last published *release*, not `main` HEAD.** Comparing to `main` forces **every** PR to bump beyond the previous merged PR, so versions inflate per-PR (rc4, rc5, rc6…) with no release between them. Instead resolve the base from the latest published release tag — `gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName'`, strip the leading `v` — and pass only when the manifest version **differs from that**. Now several unreleased PRs can sit at the same in-progress version (the first PR of a cycle bumps `main` once; later PRs ride it), and the single bump folds into whatever release is cut next. A PR that doesn't change the manifest still passes as long as `main` is already ahead of the last release — which it is, mid-cycle.
+
+**Exempt Dependabot from the version gate.** Dependabot PRs never touch `manifest.json`, and right after a release (`main` == last release) a no-bump PR equals the released version → the gate's "unchanged" rule trips. Add `&& github.event.pull_request.user.login != 'dependabot[bot]'` to the **failing** steps' `if:` (the "unchanged" and "incorrect version" comment-and-`exit 1` steps), *not* a job-level `if:` — a job-level skip can read as a missing required check, whereas skipping just the failing steps keeps the job **green** for Dependabot while staying strict for humans. The push-context run already passes (the failing steps are `pull_request`-only). With this, Dependabot PRs fold into the next release with no bump, exactly as intended.
+
 > ⚠️ **Orphaned-branch trap (the dev-PR auto-merges fast — this WILL bite repeatedly).** `create-dev-pr.yml` opens a draft PR that gets merged to `main` as soon as it's approved/auto-merged. **Any commit you push to `feat/rcN` after that merge is stranded** — it's not on `main` and not in the release, even though `git status` on the branch looks fine. It also leaves the branch's manifest equal to `main`'s, so `check-manifest-version` fails. **Guard every time, not just when you remember:**
 > 1. At the **start** of any rc work and before claiming work is "pushed/live", run `git fetch origin` then `git log --oneline origin/main..feat/rcN`. If `main` already contains a merge of this branch, the branch is spent.
 > 2. When a cycle has merged/released: **branch fresh** `git checkout -b feat/rc(N+1) origin/main`, `git cherry-pick` the orphaned commits (oldest-first), bump `manifest.json` to the next `rcN` **and** `ENGINE_VERSION` (firmware/version.py + the integration's mirror) if any firmware changed, run the sync + guards, push, then delete the merged branch (local + remote).
@@ -536,6 +550,20 @@ Fixes, in order of preference:
 - Add `concurrency: {group: dev-pr-${{ github.ref }}, cancel-in-progress: true}` so rapid pushes can't race into two PRs.
 - Skip PR creation when the branch has **0 commits ahead of main** (`git rev-list --count origin/main..HEAD`) — otherwise pushing to an already-merged branch re-spawns a PR.
 - On update, re-set the **title** (`gh pr edit --title`) to the current winning commit type — the autolabeler re-labels from the new title on the next `synchronize`. (Don't manage labels in this workflow; that's the autolabeler's job.)
+
+---
+
+## Dependabot (for a HA custom integration)
+
+`.github/dependabot.yml` with `commit-message.prefix: "chore"` on each ecosystem (so titles read `chore: bump …` → the autolabeler maps `chore` → patch). Know what it actually buys you:
+
+- **`github-actions`** — the real value. Bumps `actions/checkout`, `setup-python`, action pins across all workflows.
+- **`pip`** — points at `requirements.test.txt` / `pyproject`. **Near-useless if those are unpinned** (no version specifier = nothing to bump). Keep it for when something gets pinned, but don't expect PRs.
+- **`manifest.json` `requirements` are invisible to Dependabot** — it can't parse the manifest, and the entries are open `>=` ranges (HA installs the latest matching anyway), so there's nothing to *routinely* bump. Raising a `>=` floor is a deliberate safety/feature act, not automation — **unless** you want the floors kept current.
+
+**Keeping `>=` floors current (custom, since Dependabot can't):** a small `scripts/update_manifest_floors.py` (parse manifest requirements, query PyPI `…/pypi/{name}/json` for the latest non-prerelease, raise the floor if newer; `--check` to dry-run) plus a scheduled `update_manifest_floors.yml` (`schedule:` + `workflow_dispatch`) that runs it and — on a change — commits to a branch and pushes, letting `create-dev-pr` open the PR. Don't add a second PR-creator (e.g. `peter-evans/create-pull-request`); it races `create-dev-pr` into duplicate PRs. The floor-bump PR needs **no manifest version bump** under the last-release gate model above.
+
+**Two gotchas Dependabot forces, both covered above:** the **version gate** must compare against the last release and **exempt `dependabot[bot]`** (see the versioning section), and **`$BODY`** must come out of the release-notes `change-template` (see release-drafter).
 
 ---
 
