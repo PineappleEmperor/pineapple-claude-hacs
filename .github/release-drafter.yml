@@ -39,6 +39,20 @@ change-template: |-
   - $TITLE @$AUTHOR (#$NUMBER)
   $BODY
 change-title-escapes: '\<*_&' # You can add # and @ to disable mentions, and add ` to disable code blocks.
+# $BODY is global (release-drafter has no per-category change-template), so Dependabot's
+# body would inline too. Bounded replacers scrub the bot fluff while keeping human PRs'
+# grouped mini-changelog. Bounded = no end-anchor, so they can't bleed across PR bodies.
+replacers:
+  - search: '/<details>[\s\S]*?<\/details>\s*/g'
+    replace: ''
+  - search: '/\[!\[Dependabot compatibility score\][^\n]*\n?/g'
+    replace: ''
+  - search: '/Dependabot will resolve[^\n]*\n?/g'
+    replace: ''
+  - search: '/\/\/: # \(dependabot-start\)[\s\S]*?\/\/: # \(dependabot-end\)\s*/g'
+    replace: ''
+  - search: '/<br\s*\/?>\s*/g'
+    replace: ''
 version-resolver:
   major:
     labels:
