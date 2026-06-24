@@ -256,6 +256,22 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(MySensor(coordinator, desc) for desc in SENSORS)
 ```
 
+**`UpdateEntity` (firmware/OTA install)**
+- `_attr_in_progress` only **greys out the dashboard install button** — it does **not** stop a programmatic re-entry. A service call, automation, or two near-simultaneous dashboard clicks can still re-enter `async_install` while an install is mid-flight, double-pushing the OTA. Add an **explicit re-entry guard** at the top of `async_install` (after any can't-install checks), windowed so a crashed/timed-out install can't wedge the entity forever:
+  ```python
+  async def async_install(self, version, backup, **kwargs) -> None:
+      if self._reflash:
+          raise HomeAssistantError("Layout change — reflash via USB, not OTA.")
+      if self._installing and time.monotonic() - self._install_started < INSTALL_TIMEOUT:
+          raise HomeAssistantError("An update is already in progress for this device.")
+      self._installing = True
+      self._install_started = time.monotonic()
+      self._attr_in_progress = True
+      self.async_write_ha_state()
+      ...  # push the OTA
+  ```
+  Clear `_installing` when the new version lands (or the same window elapses) in whatever resyncs state from the device manifest. The `in_progress` flag is for the UI; the boolean+timestamp is the actual lock.
+
 **`DataUpdateCoordinator` (polling)**
 - `update_interval` minimum 5 s
 - Set `always_update=False` when API responses support `__eq__` — avoids unnecessary state machine writes
@@ -520,7 +536,30 @@ Common `exempt`s for a local-push MQTT device integration: `appropriate-polling`
 3. `release-drafter.yml` config maps labels → semver bump: `feature` → minor, `fix`/`chore` → patch, `major`/`xfeat`/`xfeature` → major.
 4. On tag push (`v*.*.*`), `semantic_release.yml` cuts the GitHub release
 
-⚠️ **One labeler, title-only — don't hand-roll a second one.** The autolabeler can only match title/body/branch/files (never commit subjects). Label off the **title** (which `create-dev-pr` derives from commits) and keep it the *only* labeler. Pitfalls that bit hard: (a) a second label step in `create-dev-pr.yml` **fights** the autolabeler → labels flap (add/remove every push); (b) `branch:` rules flap when the branch name disagrees with the commits (e.g. branch `chore/…`, commits `feat:`) — so use **title-only** rules. Resist re-adding custom bash to "label from commit subjects"; the title already encodes the winning type. (Minor: the autolabeler only *adds*, so if the dominant type changes mid-PR a stale label can linger — the `version-resolver` still takes the highest, and it's rare since a PR is usually one type.)
+⚠️ **One labeler, title-only — don't hand-roll a second one.** The autolabeler can only match title/body/branch/files (never commit subjects). Label off the **title** (which `create-dev-pr` derives from commits) and keep it the *only* labeler. Pitfalls that bit hard: (a) a second label step in `create-dev-pr.yml` **fights** the autolabeler → labels flap (add/remove every push); (b) `branch:` rules flap when the branch name disagrees with the commits (e.g. branch `chore/…`, commits `feat:`) — so use **title-only** rules. Resist re-adding custom bash to "label from commit subjects"; the title already encodes the winning type.
+
+⚠️ **Stale superseded labels — NOT rare in a squash + rc-cycle repo.** The autolabeler only *adds*, never removes. When a PR's title flips type mid-life (`fix:` → `feat:` as scope grows — routine on a long-lived `feat/rcN` branch), the **old type label lingers alongside the new one**. release-drafter is PR-granular and lists a PR under **every** matching label's category, so a double-labelled PR shows up under *two* headings (e.g. both `## 🚀 Features` and `## 🔧 Fixes`) with its full `$BODY` duplicated under each. The `version-resolver` still picks the highest for the bump, but the **release notes are wrong**. This is common — not "rare since a PR is usually one type"; rc-cycle PRs routinely accrue mixed types and a flipping title. Fix with a **removal-only** step after the autolabeler (removal-only can't flap — it only ever subtracts the non-winning labels, keyed on the same title the autolabeler reads):
+```yaml
+# pr-labeler.yml, step AFTER autolabeler@v7
+- name: Remove superseded type labels
+  env:
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    TITLE: ${{ github.event.pull_request.title }}
+    PR: ${{ github.event.pull_request.number }}
+  run: |
+    if   printf '%s' "$TITLE" | grep -qiE '^[a-z]+(\([^)]*\))?!:';        then WIN=xfeat
+    elif printf '%s' "$TITLE" | grep -qiE '^(chore|docs)(\([^)]*\))?:';   then WIN=chore
+    elif printf '%s' "$TITLE" | grep -qiE '^fix(\([^)]*\))?:';            then WIN=fix
+    elif printf '%s' "$TITLE" | grep -qiE '^(feat|feature)(\([^)]*\))?:'; then WIN=feature
+    else exit 0  # title maps to no managed label; leave labels untouched
+    fi
+    CURRENT=$(gh pr view "$PR" --json labels --jq '.labels[].name')
+    for L in xfeat feature fix chore; do
+      [ "$L" = "$WIN" ] && continue
+      printf '%s\n' "$CURRENT" | grep -qx "$L" && gh pr edit "$PR" --remove-label "$L"
+    done
+```
+The `!`-breaking branch must come first (else `feat!` matches the `feat` arm). This is still **one source of truth** — the title — and removal-only, so it can't fight the autolabeler the way a second *adding* step does. Needs `pull-requests: write`. **Note this only fixes the *labels* (one PR → one category).** Within a single squash PR whose body lists mixed-type commits, the commits stay together under that PR's one category — sort *those* by grouping the PR body itself by commit type in `create-dev-pr.yml` (bold emoji sub-heads), since release-drafter inlines `$BODY` verbatim under the category and does no intra-body sorting.
 
 ⚠️ **Type-vocab gap:** the autolabeler title rules map only `feat|fix|chore|docs` (+ `!` → `xfeat`). A title typed `ci:`, `refactor:`, `build:`, `perf:`, `style:`, `revert:` matches **nothing** → no label → no release-drafter category. Since `create-dev-pr` picks the title as `feat` > `fix` > last commit, ensure at least one commit is a mapped type (e.g. `chore:` not `ci:` for a workflow-only PR) so the title lands on something labellable. Don't hand-patch the label (clobbered next push).
 
