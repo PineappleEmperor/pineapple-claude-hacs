@@ -71,10 +71,9 @@ When the task touches a HA custom panel or any display/UI layer, invoke the
 
 ## Why
 
-I'm a programmer; my HA integrations are built with AI (Claude, via Claude Code) under human
-direction. These skills are how I keep that collaboration consistent — the AI and I challenge
-each other's choices, and the hard-won conventions live here rather than in my head. Every
-change to an integration is still human-reviewed before it merges.
+I'm a programmer; my HA integrations are built with AI (Claude, via Claude Code) for
+implementation, code review, and QA — under human direction, guided by these skills.
+Architecture and final review are mine; every change is human-reviewed before it merges.
 
 ## License
 

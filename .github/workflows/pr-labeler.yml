@@ -36,5 +36,7 @@ jobs:
           CURRENT=$(gh pr view "$PR" --json labels --jq '.labels[].name')
           for L in xfeat feature fix chore; do
             [ "$L" = "$WIN" ] && continue
-            printf '%s\n' "$CURRENT" | grep -qx "$L" && gh pr edit "$PR" --remove-label "$L"
+            if printf '%s\n' "$CURRENT" | grep -qx "$L"; then
+              gh pr edit "$PR" --remove-label "$L"
+            fi
           done
