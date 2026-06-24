@@ -544,6 +544,7 @@ Common `exempt`s for a local-push MQTT device integration: `appropriate-polling`
 - name: Remove superseded type labels
   env:
     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    GH_REPO: ${{ github.repository }}  # job has no checkout — gh would else fail "not a git repository"
     TITLE: ${{ github.event.pull_request.title }}
     PR: ${{ github.event.pull_request.number }}
   run: |
