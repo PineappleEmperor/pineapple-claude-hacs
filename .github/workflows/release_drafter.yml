@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: ver
         name: Read version from plugin manifest
         run: |
