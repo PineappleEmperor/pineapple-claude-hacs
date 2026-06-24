@@ -63,7 +63,7 @@ Check the current working directory:
   websocket, services…), invoke the `ha-integration` skill. Re-invoke it after any
   `/compact`, since compaction can drop the skill's guidance from context.
   ```
-  (A user may *additionally* wire a personal `SessionStart`/`UserPromptSubmit` hook in their own `~/.claude/settings.json`, guarded on `custom_components/*/manifest.json`, to re-arm the rule — but that's a personal convenience; the canonical, shareable enforcement lives in the repo's `CLAUDE.md`.)
+  (A user may *additionally* wire personal `SessionStart` + `UserPromptSubmit` hooks in their own `~/.claude/settings.json` to re-arm the rule and anchor the CI conventions per-turn — see the *Optional: per-turn reminder hooks* appendix below for the full recipe. That's a personal convenience; the canonical, shareable enforcement still lives in the repo's `CLAUDE.md`.)
 - `hacs.json` — minimal content: `{"name": "My Integration"}` (HACS only strictly requires `name`; add `"homeassistant": "2024.1.0"` for minimum HA version)
 - `pyproject.toml`
 - `pyrightconfig.json`
@@ -104,10 +104,9 @@ convert -background none -density 144 custom_components/{domain}/brand/logo.svg 
 The `description`, `issues`, and `topics` checks fail silently until the first `hacs_validate` run — they're GitHub settings, not files.
 
 **GitHub workflows** — look for existing workflow files in the current project first and replicate the same patterns. If none exist, use standard HA integration CI:
-- `.github/workflows/semantic_release.yml` — triggers on `v*.*.*` tag push; uses `softprops/action-gh-release@v2` with `generate_release_notes: true`. Tags containing `beta` auto-marked as prerelease. No npm, no semantic-release tooling needed.
-- `.github/workflows/create-dev-pr.yml` — triggers on every push to non-main branches; auto-creates a draft PR with **title from commits** (`feat:` wins over `fix:` wins over last commit). Updates PR body with commit list on subsequent pushes. Copy from `~/ha-imap-parcel/.github/workflows/create-dev-pr.yml`. ⚠️ After computing `TITLE`, always add `TITLE=$(echo "$TITLE" | xargs)` before `echo "title=$TITLE" >> $GITHUB_OUTPUT` — GitHub Actions env var interpolation can add surrounding whitespace that breaks `lint_pr.yml` semantic title validation. **Do NOT add a label step here** — labelling is the autolabeler's job (below). Since this sets the title to the winning commit type, autolabelling off the title is effectively commit-driven; a second labeler here just causes flapping.
-- `.github/workflows/release.yml`
-- `.github/workflows/release_drafter.yml` — owns the draft release notes (categories + `version-resolver` + `$BODY`); both `push` (main) and `pull_request` triggers; `pull-requests: write`.
+- `.github/workflows/semantic_release.yml` — triggers on `v*.*.*` tag push; uses `softprops/action-gh-release@v3` with `generate_release_notes: true`. Tags containing `beta` auto-marked as prerelease. No npm, no semantic-release tooling needed.
+- `.github/workflows/create-dev-pr.yml` — triggers on every push to non-main branches; auto-creates a draft PR with **title from commits** (`feat:` wins over `fix:` wins over last commit). Updates PR body with commit list on subsequent pushes. **Full canonical YAML in the *create-dev-pr.yml template* appendix below** — this skill is the source of truth; do not copy from any other repo. ⚠️ After computing `TITLE`, always add `TITLE=$(echo "$TITLE" | xargs)` before `echo "title=$TITLE" >> $GITHUB_OUTPUT` — GitHub Actions env var interpolation can add surrounding whitespace that breaks `lint_pr.yml` semantic title validation. **Do NOT add a label step here** — labelling is the autolabeler's job (below). Since this sets the title to the winning commit type, autolabelling off the title is effectively commit-driven; a second labeler here just causes flapping.
+- `.github/workflows/release_drafter.yml` — owns the draft release notes (categories + `version-resolver` + `$BODY`); `push` (main) trigger only; `pull-requests: write`. Labelling lives in `pr-labeler.yml` (the sole labeler), so this carries no autolabeler job.
 - `.github/workflows/pr-labeler.yml` — runs `release-drafter/release-drafter/autolabeler@v7` on `pull_request` (opened/reopened/synchronize). The **sole labeler.**
 - `.github/workflows/lint_pr.yml`
 - `.github/workflows/hacs_validate.yml`
@@ -117,6 +116,555 @@ The `description`, `issues`, and `topics` checks fail silently until the first `
 - `.github/pr-labeler.yml`
 - `.github/release-drafter.yml` — autolabeler rules are **title-only** (no `branch:` rules). The release-drafter autolabeler can only match title/body/branch/files (never commit subjects), so label off the **title** — which `create-dev-pr` already derives from the commits. Keep it the one-and-only labeler; don't also label in `create-dev-pr.yml`.
 - `.github/dependabot.yml` — see the **Dependabot** section below.
+
+#### create-dev-pr.yml template (canonical — copy this, no external repo)
+
+Self-contained; embodies every rule above (title from commits, grouped `$BODY` sub-heads, `xargs` title trim, no label step, concurrency guard, skip when 0 ahead). Pin actions to current majors and let Dependabot bump them.
+
+```yaml
+name: Create/Update Dev PR
+
+on:
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: dev-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  create-or-update-pr:
+    runs-on: ubuntu-latest
+    outputs:
+      pr_number: ${{ steps.pr.outputs.pr_number }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Generate PR body and title type from commits
+        id: commits
+        run: |
+          AHEAD=$(git rev-list --count origin/main..HEAD)
+          echo "ahead=$AHEAD" >> $GITHUB_OUTPUT
+
+          SUBJECTS=$(git log origin/main..HEAD --pretty=format:"%s" --reverse)
+
+          # Group the body by commit type so release-drafter's $BODY reads as a
+          # sorted mini-changelog under the PR's category (bold emoji sub-heads).
+          classify() {
+            printf '%s' "$1" | grep -qiE '^[a-z]+(\([^)]*\))?!:' && { echo breaking; return; }
+            printf '%s' "$1" | grep -qiE '^feat(\([^)]*\))?:'    && { echo feat; return; }
+            printf '%s' "$1" | grep -qiE '^fix(\([^)]*\))?:'     && { echo fix; return; }
+            printf '%s' "$1" | grep -qiE '^(chore|docs|refactor|perf|test|build|ci|style)(\([^)]*\))?:' && { echo maint; return; }
+            echo other
+          }
+          desc() { printf '%s' "$1" | sed -E 's/^[a-zA-Z]+(\([^)]*\))?!?:[[:space:]]*//'; }
+
+          BREAKING=""; FEAT=""; FIX=""; MAINT=""; OTHER=""
+          while IFS= read -r s; do
+            [ -z "$s" ] && continue
+            d=$(desc "$s")
+            case "$(classify "$s")" in
+              breaking) BREAKING="${BREAKING}  - ${d}"$'\n' ;;
+              feat)     FEAT="${FEAT}  - ${d}"$'\n' ;;
+              fix)      FIX="${FIX}  - ${d}"$'\n' ;;
+              maint)    MAINT="${MAINT}  - ${d}"$'\n' ;;
+              *)        OTHER="${OTHER}  - ${d}"$'\n' ;;
+            esac
+          done <<< "$SUBJECTS"
+
+          BODY=""
+          [ -n "$BREAKING" ] && BODY="${BODY}  **🚨 Breaking**"$'\n'"${BREAKING}"
+          [ -n "$FEAT" ]     && BODY="${BODY}  **🚀 Features**"$'\n'"${FEAT}"
+          [ -n "$FIX" ]      && BODY="${BODY}  **🔧 Fixes**"$'\n'"${FIX}"
+          [ -n "$MAINT" ]    && BODY="${BODY}  **🧰 Maintenance**"$'\n'"${MAINT}"
+          [ -n "$OTHER" ]    && BODY="${BODY}  **📦 Other**"$'\n'"${OTHER}"
+          [ -z "$BODY" ] && BODY="  - (no commits ahead of main)"
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          printf '%s' "$BODY" >> $GITHUB_OUTPUT
+          printf '\n' >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          TITLE=$(echo "$SUBJECTS" | grep -iE "^feat(\(.+\))?!?:" | tail -1)
+          if [ -z "$TITLE" ]; then
+            TITLE=$(echo "$SUBJECTS" | grep -iE "^fix(\(.+\))?!?:" | tail -1)
+          fi
+          if [ -z "$TITLE" ]; then
+            TITLE=$(echo "$SUBJECTS" | tail -1)
+          fi
+          TITLE=$(echo "$TITLE" | xargs)
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+
+      - name: Create or update draft PR
+        id: pr
+        if: steps.commits.outputs.ahead != '0'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.ref_name }}
+          BODY: ${{ steps.commits.outputs.body }}
+          TITLE: ${{ steps.commits.outputs.title }}
+        run: |
+          PR_NUMBER=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number')
+          if [ -z "$PR_NUMBER" ]; then
+            gh pr create \
+              --draft \
+              --title "$TITLE" \
+              --body "$BODY" \
+              --base main \
+              --head "$BRANCH"
+            PR_NUMBER=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number')
+          else
+            gh pr edit "$PR_NUMBER" --title "$TITLE" --body "$BODY"
+          fi
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+```
+
+#### Remaining workflow + config templates (canonical — copy these, no external repo)
+
+All paths assume one integration per repo: `custom_components/<domain>/manifest.json` is resolved with `ls custom_components/*/manifest.json | head -1`. Action majors are current as of 2026-06; Dependabot (`github-actions`) keeps them bumped. (`release.yml` is **not** a separate file — the release path is `release_drafter.yml` drafting notes on `main` + `semantic_release.yml` cutting the release on the tag.)
+
+**`.github/workflows/lint_pr.yml`** — semantic PR-title gate.
+```yaml
+name: Lint PR
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  main:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+**`.github/workflows/pr-labeler.yml`** — the **sole** labeler: autolabeler adds, removal-only step subtracts superseded type labels (can't flap).
+```yaml
+name: PR Labeler
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-labeler:
+    permissions:
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: release-drafter/release-drafter/autolabeler@v7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The autolabeler only *adds*. When a PR's title flips type mid-life
+      # (fix -> feat), the old label lingers and the PR lists under two
+      # release-drafter categories. Remove superseded labels, keyed on the
+      # same title the autolabeler reads (removal-only -> cannot flap).
+      - name: Remove superseded type labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}  # job has no checkout
+          TITLE: ${{ github.event.pull_request.title }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if   printf '%s' "$TITLE" | grep -qiE '^[a-z]+(\([^)]*\))?!:';        then WIN=xfeat
+          elif printf '%s' "$TITLE" | grep -qiE '^(chore|docs)(\([^)]*\))?:';   then WIN=chore
+          elif printf '%s' "$TITLE" | grep -qiE '^fix(\([^)]*\))?:';            then WIN=fix
+          elif printf '%s' "$TITLE" | grep -qiE '^(feat|feature)(\([^)]*\))?:'; then WIN=feature
+          else exit 0  # title maps to no managed label; leave labels untouched
+          fi
+          CURRENT=$(gh pr view "$PR" --json labels --jq '.labels[].name')
+          for L in xfeat feature fix chore; do
+            [ "$L" = "$WIN" ] && continue
+            # `if` (not `grep && gh`): a no-match grep as the step's last command
+            # returns 1 under `bash -e`, failing the step even when nothing's wrong.
+            if printf '%s\n' "$CURRENT" | grep -qx "$L"; then
+              gh pr edit "$PR" --remove-label "$L"
+            fi
+          done
+```
+
+**`.github/workflows/release_drafter.yml`** — drafts release notes on `main` only (labelling lives in `pr-labeler.yml`, so no autolabeler job here). Reads the release version from the manifest.
+```yaml
+name: Release Drafter
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update_release_draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: ver
+        name: Read version from manifest
+        run: |
+          MANIFEST=$(ls custom_components/*/manifest.json | head -1)
+          V=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "$MANIFEST")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if echo "$V" | grep -Eiq '[0-9][-._]?(rc|alpha|beta|dev|a|b)'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: release-drafter/release-drafter@v7
+        with:
+          version: ${{ steps.ver.outputs.version }}
+          tag: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
+          prerelease: ${{ steps.ver.outputs.prerelease }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+**`.github/release-drafter.yml`** (config) — title-only autolabeler rules (breaking `!` first), `$BODY` kept with bounded Dependabot `replacers`, label→semver `version-resolver`.
+```yaml
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+# Sole labeler keyed on the PR TITLE only — create-dev-pr.yml sets the title to the
+# winning commit type, so this is effectively commit-driven. No branch rules (they
+# flapped when branch name disagreed with commits). Breaking `!` must precede `feature`.
+autolabeler:
+  - label: "xfeat"
+    title:
+      - '/^\w+(\(.+\))?!:/'
+  - label: "chore"
+    title:
+      - '/^(chore|docs|refactor|perf|test|build|ci|style)(\(.+\))?:/i'
+  - label: "fix"
+    title:
+      - '/^fix(\(.+\))?:/i'
+  - label: "feature"
+    title:
+      - '/^(feat|feature)(\(.+\))?:/i'
+categories:
+  - title: '🚨 Breaking Change'
+    labels: ['xfeat', 'xfeature', 'major']
+  - title: '🚀 Features'
+    labels: ['feat', 'feature', 'enhancement']
+  - title: '🔧 Fixes'
+    labels: ['fix', 'bugfix', 'bug']
+  - title: '🧰 Maintenance'
+    label: 'chore'
+change-template: |-
+  - $TITLE @$AUTHOR (#$NUMBER)
+  $BODY
+change-title-escapes: '\<*_&'
+# $BODY is global (no per-category change-template). Bounded replacers (no end-anchor,
+# so they can't bleed across concatenated PR bodies) scrub Dependabot fluff while
+# keeping human PRs' grouped mini-changelog.
+replacers:
+  - search: '/<details>[\s\S]*?<\/details>\s*/g'
+    replace: ''
+  - search: '/\[!\[Dependabot compatibility score\][^\n]*\n?/g'
+    replace: ''
+  - search: '/Dependabot will resolve[^\n]*\n?/g'
+    replace: ''
+  - search: '/\/\/: # \(dependabot-start\)[\s\S]*?\/\/: # \(dependabot-end\)\s*/g'
+    replace: ''
+  - search: '/<br\s*\/?>\s*/g'
+    replace: ''
+version-resolver:
+  major:
+    labels: ['major', 'xfeature', 'xfeat']
+  minor:
+    labels: ['feat', 'feature', 'minor']
+  patch:
+    labels: ['patch', 'fix', 'chore', 'bugfix', 'bug']
+  default: patch
+template: |
+  ## Changes
+
+  $CHANGES
+```
+
+**`.github/workflows/semantic_release.yml`** — cuts the GitHub release on a `v*.*.*` tag; `rc/alpha/beta` tags marked prerelease.
+```yaml
+name: Semantic Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: pre
+        name: Mark prerelease for rc/beta/alpha tags
+        run: |
+          if echo "${GITHUB_REF_NAME}" | grep -Eiq '(rc|alpha|beta|dev|a|b)[0-9]*$'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          prerelease: ${{ steps.pre.outputs.prerelease }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+**`.github/workflows/hassfest_validate.yml`** — HA manifest/services/quality-scale validation.
+```yaml
+name: Hassfest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 0 * * *"
+
+jobs:
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: home-assistant/actions/hassfest@master
+```
+
+**`.github/workflows/hacs_validate.yml`** — HACS 8-check validation. **No `ignore:` input** — ignoring any check disqualifies the repo from the default store.
+```yaml
+name: HACS Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 0 * * *"
+
+jobs:
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration
+```
+
+**`.github/workflows/python_validate.yml`** — ruff + pyright on HA's floor Python (keep the matrix in lockstep with `pyproject.toml` / `pyrightconfig.json`).
+```yaml
+name: Python Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-and-type:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install homeassistant ruff pyright
+          [ -f requirements.test.txt ] && pip install -r requirements.test.txt || true
+      - name: Ruff
+        run: ruff check custom_components/
+      - name: Pyright
+        run: python -m pyright custom_components/
+```
+
+**`.github/workflows/check-manifest-version.yml`** — version gate **against the last published release** (not `main` HEAD), de-anchored base parse (tolerates `rcN`), prerelease versions only need to differ, and **`dependabot[bot]` exempted on the failing steps** (skip the steps, not the job, to keep the check green-not-missing).
+```yaml
+name: Check Manifest Version
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  push:
+    branches-ignore:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check_version:
+    name: Manifest version bumped vs last release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve manifest path and PR version
+        id: manifest
+        run: |
+          MANIFEST=$(ls custom_components/*/manifest.json | head -1)
+          echo "path=$MANIFEST" >> "$GITHUB_OUTPUT"
+          echo "pr_version=$(jq -r '.version' "$MANIFEST")" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve last published release version
+        id: base
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName')
+          BASE="${TAG#v}"; [ -z "$BASE" ] && BASE="0.0.0"
+          echo "base_version=$BASE" >> "$GITHUB_OUTPUT"
+
+      - name: Compare
+        id: compare
+        run: |
+          BASE="${{ steps.base.outputs.base_version }}"
+          PR="${{ steps.manifest.outputs.pr_version }}"
+          echo "Last release: $BASE   manifest: $PR"
+          if [ "$BASE" = "$PR" ]; then echo "unchanged=true" >> "$GITHUB_OUTPUT"; else echo "unchanged=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Determine bump from PR labels
+        id: bump
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LABELS=$(gh pr view ${{ github.event.pull_request.number }} --json labels -q '.labels[].name')
+          BASE="${{ steps.base.outputs.base_version }}"
+          PR="${{ steps.manifest.outputs.pr_version }}"
+          # de-anchored parse: a base carrying rcN still yields X.Y.Z
+          if [[ "$BASE" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+            MAJOR="${BASH_REMATCH[1]}"; MINOR="${BASH_REMATCH[2]}"; PATCH="${BASH_REMATCH[3]}"
+          else
+            echo "❌ Cannot parse base version: $BASE"; exit 1
+          fi
+          # prerelease PR version only needs to differ from base -> skip the bump suggestion
+          if [[ "$PR" =~ (rc|alpha|beta|a|b|dev)[0-9]*$ ]]; then
+            echo "pr_is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pr_is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          if   echo "$LABELS" | grep -qiE 'xfeat|xfeature|major'; then BUMP=xfeature; EXPECTED="v$((MAJOR+1)).0.0"
+          elif echo "$LABELS" | grep -qiE 'feat|feature';         then BUMP=feature;  EXPECTED="v$MAJOR.$((MINOR+1)).0"
+          elif echo "$LABELS" | grep -qiE 'fix|patch|chore';      then BUMP=fix;      EXPECTED="v$MAJOR.$MINOR.$((PATCH+1))"
+          else BUMP=none; EXPECTED=""
+          fi
+          echo "recommended=$BUMP" >> "$GITHUB_OUTPUT"
+          echo "suggested=$EXPECTED" >> "$GITHUB_OUTPUT"
+
+      # Failing steps skip dependabot[bot] (it never bumps the manifest; a no-bump PR
+      # right after a release equals the released version and would trip "unchanged").
+      # Skip the STEP, not the job — a skipped job can read as a missing required check.
+      - name: Fail if version unchanged vs last release
+        if: github.event_name == 'pull_request' && steps.compare.outputs.unchanged == 'true' && github.event.pull_request.user.login != 'dependabot[bot]'
+        run: |
+          echo "❌ manifest version (${{ steps.manifest.outputs.pr_version }}) == last release; bump it (suggested ${{ steps.bump.outputs.suggested }})."
+          exit 1
+
+      - name: Fail if version incorrect for label
+        if: github.event_name == 'pull_request' && steps.bump.outputs.pr_is_prerelease != 'true' && steps.bump.outputs.recommended != 'none' && steps.bump.outputs.suggested != format('v{0}', steps.manifest.outputs.pr_version) && github.event.pull_request.user.login != 'dependabot[bot]'
+        run: |
+          echo "❌ label implies ${{ steps.bump.outputs.recommended }} -> expected ${{ steps.bump.outputs.suggested }}, got v${{ steps.manifest.outputs.pr_version }}."
+          exit 1
+```
+
+**`.github/dependabot.yml`** — `github-actions` is the real value; `pip` covers `requirements.test.txt` when pinned. `chore` prefix → autolabeler maps to patch.
+```yaml
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+```
+
+#### Optional: per-turn reminder hooks (personal `~/.claude`)
+
+The repo `CLAUDE.md` rule is the **canonical, shareable** enforcement (it ships with the repo, applies to everyone). These two personal hooks are a *convenience* layer on top — they live in your own `~/.claude/` and re-arm the rules every session/turn so they don't drift down-context in a long session. **Marker-file gated** so each only fires where it applies: the skill anchor on an integration repo (`custom_components/*/manifest.json`), the CI-convention anchor on any repo using this workflow stack (`.github/workflows/create-dev-pr.yml`) — which includes this skill's own repo, not just scaffolded integrations.
+
+`~/.claude/settings.json` (merge into existing `hooks`):
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup|resume|compact",
+        "hooks": [{ "type": "command", "command": "bash \"$HOME/.claude/hooks/ha-skill-reinvoke.sh\"" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "bash \"$HOME/.claude/hooks/ha-resources-reminder.sh\"" }] }
+    ]
+  }
+}
+```
+
+`~/.claude/hooks/ha-skill-reinvoke.sh` — re-arms the skill rule at session start (compaction drops the skill's guidance; stdout is injected as session context):
+```bash
+#!/usr/bin/env bash
+# SessionStart: in an HA custom-integration repo, re-arm the ha-integration skill rule.
+if ls custom_components/*/manifest.json >/dev/null 2>&1; then
+  cat <<'MSG'
+[ha-integration] This repo is a Home Assistant custom integration. Invoke the `ha-integration` skill via the Skill tool BEFORE modifying any integration code this session, and re-invoke after every /compact.
+MSG
+fi
+```
+
+`~/.claude/hooks/ha-resources-reminder.sh` — per-turn anchors; stdout is injected as prompt context, so keep each line terse:
+```bash
+#!/usr/bin/env bash
+# UserPromptSubmit: per-turn anchors. Independent, each marker-gated.
+
+# HA-integration repos: skill + quality anchors.
+if ls custom_components/*/manifest.json >/dev/null 2>&1; then
+  msg="[ha-integration] ha-integration skill active before integration edits · keep quality_scale.yaml honest · verify HA APIs at developers.home-assistant.io"
+  [ -d firmware ] && msg="$msg · run scripts/sync_render.py after firmware/ edits"
+  echo "$msg."
+fi
+
+# Any repo on this workflow stack (the skill repo AND scaffolded integrations):
+# the commit/PR conventions that drift down-context mid-session.
+if [ -f .github/workflows/create-dev-pr.yml ]; then
+  echo "[ci-conventions] commit & PR subject = ONE tight imperative (lowercase after the colon, no trailing period, no comma-joined dual subject). create-dev-pr.yml OWNS the PR — never hand-create it with gh pr create; push the branch and let the action open/update it (PR title mirrors the winning commit subject). Branch off main; bump the manifest/plugin version once, as the last commit before merge."
+fi
+```
+
+`chmod +x` both scripts. Editing a hook *script* takes effect immediately (the hook re-execs it each turn); editing `settings.json` to add/remove a hook needs a `/hooks` open or restart to re-register.
 
 ---
 
@@ -285,6 +833,15 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 **`ConfigEntry` mutation**
 - Never mutate `ConfigEntry` directly — always use `hass.config_entries.async_update_entry(entry, data=..., options=...)`
+
+**Logging** (Silver `log-when-unavailable`; HA logging conventions)
+- **The coordinator already gives you `log-when-unavailable` for free.** When `_async_update_data` raises `UpdateFailed`, `DataUpdateCoordinator` logs the *first* failure at **ERROR**, subsequent consecutive failures at **DEBUG** (no spam), and logs **recovery** automatically. So **do not** wrap the fetch in your own try/log — manual error logging there is double-logging and *fails* the rule. Same for `ConfigEntryNotReady`/`ConfigEntryAuthFailed`: HA logs the reason once; don't also `_LOGGER.exception(...)` in `async_setup_entry` (delete broad `try/except: log; raise` wrappers — they spam and add nothing).
+- **Don't log-and-raise.** Raise the right exception and let HA log it: transient → `UpdateFailed`/`ConfigEntryNotReady`; auth → `ConfigEntryAuthFailed`; service/action errors → `HomeAssistantError`/`ServiceValidationError` (Silver `action-exceptions`). Logging *and* raising the same condition is noise.
+- **Level discipline:** `INFO` is shown by default → use it almost never. **Setup / unload / teardown lifecycle = `DEBUG`, not `INFO`.** `WARNING` = recoverable thing the user should know; `ERROR` = unexpected, actionable bug (never for expected transient failures — those are exceptions HA handles). `DEBUG` = per-poll / developer detail.
+- **Lazy `%` args, never f-strings:** `_LOGGER.debug("added %s", key)` not `f"added {key}"` — ruff `G004` / pylint `logging-fstring-interpolation` enforce. f-string args evaluate even when the level is disabled.
+- **Never log secrets** — credentials, API keys, tokens, raw auth responses.
+- Logger name (`logging.getLogger(__name__)`) already carries the module path — don't prefix messages with the integration name or "Home Assistant".
+- Remove a module-level `_LOGGER` that ends up unused (e.g. after deleting lifecycle spam) — ruff won't flag an unused module global, so it lingers silently.
 
 **Custom services**
 - Register in `async_setup` (not `async_setup_entry`) to avoid duplicate registration across multiple config entries
@@ -541,7 +1098,7 @@ Common `exempt`s for a local-push MQTT device integration: `appropriate-polling`
 >     - search: '/<br\s*\/?>\s*/g'
 >       replace: ''
 >   ```
->   Leaves Dependabot's clean opener (`Bumps [pkg] from a to b.`) as the body — a fine one-liner. Regex over bot output is inherently brittle: revisit if Dependabot changes its format. (Reference impl lives in `ocado-ha` `.github/release-drafter.yml` + `create-dev-pr.yml`.)
+>   Leaves Dependabot's clean opener (`Bumps [pkg] from a to b.`) as the body — a fine one-liner. Regex over bot output is inherently brittle: revisit if Dependabot changes its format. (The full `create-dev-pr.yml` that builds the grouped `$BODY` is inlined in the *create-dev-pr.yml template* appendix above — no external repo needed.)
 >
 > **Adopt this in every repo** — enable Dependabot (`github-actions` ecosystem at minimum) *and* the `$BODY`+grouping+`replacers` release-drafter, so release notes carry real per-PR detail without bot noise everywhere. (A repo on the old title-only template is behind, not "configured differently".)
 
@@ -582,7 +1139,11 @@ Common `exempt`s for a local-push MQTT device integration: `appropriate-polling`
     CURRENT=$(gh pr view "$PR" --json labels --jq '.labels[].name')
     for L in xfeat feature fix chore; do
       [ "$L" = "$WIN" ] && continue
-      printf '%s\n' "$CURRENT" | grep -qx "$L" && gh pr edit "$PR" --remove-label "$L"
+      # `if` (not `grep && gh`): a no-match grep as the step's last command
+      # returns 1 under `bash -e`, failing the step even when nothing's wrong.
+      if printf '%s\n' "$CURRENT" | grep -qx "$L"; then
+        gh pr edit "$PR" --remove-label "$L"
+      fi
     done
 ```
 The `!`-breaking branch must come first (else `feat!` matches the `feat` arm). This is still **one source of truth** — the title — and removal-only, so it can't fight the autolabeler the way a second *adding* step does. Needs `pull-requests: write`. **Note this only fixes the *labels* (one PR → one category).** Within a single squash PR whose body lists mixed-type commits, the commits stay together under that PR's one category — sort *those* by grouping the PR body itself by commit type in `create-dev-pr.yml` (bold emoji sub-heads), since release-drafter inlines `$BODY` verbatim under the category and does no intra-body sorting.
@@ -617,7 +1178,7 @@ Narrow, often-misunderstood footgun: **the `pull_request: opened` event from a P
 **Practical upshot:** with **no PAT**, a branch pushed **more than once** (i.e. nearly always) gets full automation — the auto-PR opens, and your next push triggers all checks. The footgun only bites a branch pushed **exactly once** then merged untouched. Don't reach for a PAT reflexively; it's rarely needed.
 
 Fixes, in order of preference:
-- **Usually nothing** — push more than once (you will anyway) and `synchronize` covers it. This is what the reference repos actually rely on (no PAT in any of them).
+- **Usually nothing** — push more than once (you will anyway) and `synchronize` covers it. This is the default the canonical workflows rely on (no PAT needed).
 - **No-secret hardening for the must-always-enforce gate:** add a `push:` trigger (`branches-ignore: [main]`) to `check-manifest-version` so the version gate runs on the branch push regardless of PR events — covers even the single-push case. Default the base ref to `main` when there's no PR context (`${{ github.event.pull_request.base.ref || 'main' }}`) and guard PR-only steps with `if: github.event_name == 'pull_request'` (label lookups, PR comments).
 - **PAT (only if you truly need single-push auto-PRs fully checked):** open the dev PR with a fine-grained, repo-scoped PAT (`Pull requests: write` + `Contents: read`, short expiry) instead of `GITHUB_TOKEN` — PAT-authored events aren't suppressed, so even the `opened` fires everything. Costs a secret to rotate; reserve for when single-push branches matter.
 

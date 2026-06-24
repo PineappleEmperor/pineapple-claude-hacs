@@ -1,7 +1,7 @@
 {
   "name": "ha",
   "description": "Skills for building Home Assistant custom integrations (Platinum quality scale) and native-looking custom panels.",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": {
     "name": "PineappleEmperor"
   }
