@@ -518,7 +518,32 @@ Common `exempt`s for a local-push MQTT device integration: `appropriate-polling`
 
 **Match release-drafter when writing the PR body.** If `change-template` includes `$BODY`, the PR description is inlined **under** its category heading (e.g. `### 🚀 Features`). So the body must nest cleanly: use **bold emoji sub-heads** (`**🧩 Engine**`), not `#`/`##` — top-level headings render bigger than the category and clash. Mirror the config's emoji category style, and label the PR so it lands in the intended category (e.g. a `major`/`xfeature` label → 🚨 Breaking Change). Note release-drafter draws the PR body via the GraphQL path; `gh pr edit` can fail on the Projects-classic deprecation — set title/body via `gh api -X PATCH repos/{o}/{r}/pulls/{n} -f title=… -F body=@file` instead.
 
-> ⚠️ **Once Dependabot is enabled, drop `$BODY` from `change-template`.** Dependabot PR bodies carry compatibility tables, a "Dependabot is rebasing this PR" notice, and `//: # (dependabot-start)` HTML markers — all of which `$BODY` dumps straight into the release notes. release-drafter can't strip the body per-PR, so use a title-only template: `change-template: '- $TITLE @$AUTHOR (#$NUMBER)'`. Human PR bodies are just the `create-dev-pr` commit list anyway, so little is lost; add narrative by editing the draft before publishing. (This supersedes the "nest your PR body under the category" advice above — it only mattered while `$BODY` was in the template.)
+> ✅ **Canonical release-notes pattern (Dependabot + `$BODY` + `replacers` scrub) — the standard for every repo.** Keep `$BODY` in `change-template` so **human** PRs surface their grouped mini-changelog (`create-dev-pr` builds it — see below), and scrub Dependabot's noise with release-drafter **`replacers`** (native regex find/replace over the *rendered* notes). This **supersedes the older "drop `$BODY` when Dependabot is on" advice** — that worked but threw away the human per-commit detail. release-drafter has **no per-category `change-template`** (verified), so `$BODY` is global (all PRs or none); `replacers` is the only way to keep human detail *and* strip bot fluff.
+>
+> - **Group the dev-PR body by commit type** in `create-dev-pr.yml`: classify each `origin/main..HEAD` subject (`breaking`/`feat`/`fix`/`maint`/`other`), emit bold emoji sub-heads (`  **🚀 Features**`, `  **🐛 Fixes**`, `  **🧰 Maintenance**`…) with the descriptions under each, written to `$GITHUB_OUTPUT` via a heredoc. release-drafter inlines `$BODY` verbatim under the PR's one category and does **no** intra-body sorting, so the grouping must happen at body-generation time.
+> - **`change-template`** keeps the two-line `$BODY` form:
+>   ```yaml
+>   change-template: |-
+>     - $TITLE @$AUTHOR (#$NUMBER)
+>     $BODY
+>   ```
+> - **`replacers`** scrub Dependabot's fluff. All patterns must be **bounded** (no `$`/end-of-string anchor) — the changelog concatenates every PR's `$BODY`, so an end-anchored strip bleeds across PRs and eats later human entries:
+>   ```yaml
+>   replacers:
+>     - search: '/<details>[\s\S]*?<\/details>\s*/g'                                  # release-note/commit folds
+>       replace: ''
+>     - search: '/\[!\[Dependabot compatibility score\][^\n]*\n?/g'                   # compat badge
+>       replace: ''
+>     - search: '/Dependabot will resolve[^\n]*\n?/g'                                 # rebase boilerplate line
+>       replace: ''
+>     - search: '/\/\/: # \(dependabot-start\)[\s\S]*?\/\/: # \(dependabot-end\)\s*/g' # command block (bounded by its markers)
+>       replace: ''
+>     - search: '/<br\s*\/?>\s*/g'
+>       replace: ''
+>   ```
+>   Leaves Dependabot's clean opener (`Bumps [pkg] from a to b.`) as the body — a fine one-liner. Regex over bot output is inherently brittle: revisit if Dependabot changes its format. (Reference impl lives in `ocado-ha` `.github/release-drafter.yml` + `create-dev-pr.yml`.)
+>
+> **Adopt this in every repo** — enable Dependabot (`github-actions` ecosystem at minimum) *and* the `$BODY`+grouping+`replacers` release-drafter, so release notes carry real per-PR detail without bot noise everywhere. (A repo on the old title-only template is behind, not "configured differently".)
 
 **Types and semver mapping:**
 
@@ -613,7 +638,7 @@ Fixes, in order of preference:
 
 **Keeping `>=` floors current (custom, since Dependabot can't):** a small `scripts/update_manifest_floors.py` (parse manifest requirements, query PyPI `…/pypi/{name}/json` for the latest non-prerelease, raise the floor if newer; `--check` to dry-run) plus a scheduled `update_manifest_floors.yml` (`schedule:` + `workflow_dispatch`) that runs it and — on a change — commits to a branch and pushes, letting `create-dev-pr` open the PR. Don't add a second PR-creator (e.g. `peter-evans/create-pull-request`); it races `create-dev-pr` into duplicate PRs. The floor-bump PR needs **no manifest version bump** under the last-release gate model above.
 
-**Two gotchas Dependabot forces, both covered above:** the **version gate** must compare against the last release and **exempt `dependabot[bot]`** (see the versioning section), and **`$BODY`** must come out of the release-notes `change-template` (see release-drafter).
+**Two gotchas Dependabot forces, both covered above:** the **version gate** must compare against the last release and **exempt `dependabot[bot]`** (see the versioning section), and the release notes must **scrub Dependabot's body fluff via `replacers`** while keeping `$BODY` for human detail (see the canonical release-notes pattern in release-drafter — *not* the old "drop `$BODY`" workaround).
 
 ---
 
