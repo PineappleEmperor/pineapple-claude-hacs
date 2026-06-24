@@ -63,7 +63,7 @@ Check the current working directory:
   websocket, services…), invoke the `ha-integration` skill. Re-invoke it after any
   `/compact`, since compaction can drop the skill's guidance from context.
   ```
-  (A user may *additionally* wire a personal `SessionStart`/`UserPromptSubmit` hook in their own `~/.claude/settings.json`, guarded on `custom_components/*/manifest.json`, to re-arm the rule — but that's a personal convenience; the canonical, shareable enforcement lives in the repo's `CLAUDE.md`.)
+  (A user may *additionally* wire personal `SessionStart` + `UserPromptSubmit` hooks in their own `~/.claude/settings.json` to re-arm the rule and anchor the CI conventions per-turn — see the *Optional: per-turn reminder hooks* appendix below for the full recipe. That's a personal convenience; the canonical, shareable enforcement still lives in the repo's `CLAUDE.md`.)
 - `hacs.json` — minimal content: `{"name": "My Integration"}` (HACS only strictly requires `name`; add `"homeassistant": "2024.1.0"` for minimum HA version)
 - `pyproject.toml`
 - `pyrightconfig.json`
@@ -614,6 +614,57 @@ updates:
     commit-message:
       prefix: chore
 ```
+
+#### Optional: per-turn reminder hooks (personal `~/.claude`)
+
+The repo `CLAUDE.md` rule is the **canonical, shareable** enforcement (it ships with the repo, applies to everyone). These two personal hooks are a *convenience* layer on top — they live in your own `~/.claude/` and re-arm the rules every session/turn so they don't drift down-context in a long session. **Marker-file gated** so each only fires where it applies: the skill anchor on an integration repo (`custom_components/*/manifest.json`), the CI-convention anchor on any repo using this workflow stack (`.github/workflows/create-dev-pr.yml`) — which includes this skill's own repo, not just scaffolded integrations.
+
+`~/.claude/settings.json` (merge into existing `hooks`):
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup|resume|compact",
+        "hooks": [{ "type": "command", "command": "bash \"$HOME/.claude/hooks/ha-skill-reinvoke.sh\"" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "bash \"$HOME/.claude/hooks/ha-resources-reminder.sh\"" }] }
+    ]
+  }
+}
+```
+
+`~/.claude/hooks/ha-skill-reinvoke.sh` — re-arms the skill rule at session start (compaction drops the skill's guidance; stdout is injected as session context):
+```bash
+#!/usr/bin/env bash
+# SessionStart: in an HA custom-integration repo, re-arm the ha-integration skill rule.
+if ls custom_components/*/manifest.json >/dev/null 2>&1; then
+  cat <<'MSG'
+[ha-integration] This repo is a Home Assistant custom integration. Invoke the `ha-integration` skill via the Skill tool BEFORE modifying any integration code this session, and re-invoke after every /compact.
+MSG
+fi
+```
+
+`~/.claude/hooks/ha-resources-reminder.sh` — per-turn anchors; stdout is injected as prompt context, so keep each line terse:
+```bash
+#!/usr/bin/env bash
+# UserPromptSubmit: per-turn anchors. Independent, each marker-gated.
+
+# HA-integration repos: skill + quality anchors.
+if ls custom_components/*/manifest.json >/dev/null 2>&1; then
+  msg="[ha-integration] ha-integration skill active before integration edits · keep quality_scale.yaml honest · verify HA APIs at developers.home-assistant.io"
+  [ -d firmware ] && msg="$msg · run scripts/sync_render.py after firmware/ edits"
+  echo "$msg."
+fi
+
+# Any repo on this workflow stack (the skill repo AND scaffolded integrations):
+# the commit/PR conventions that drift down-context mid-session.
+if [ -f .github/workflows/create-dev-pr.yml ]; then
+  echo "[ci-conventions] commit & PR subject = ONE tight imperative (lowercase after the colon, no trailing period, no comma-joined dual subject). create-dev-pr.yml OWNS the PR — never hand-create it with gh pr create; push the branch and let the action open/update it (PR title mirrors the winning commit subject). Branch off main; bump the manifest/plugin version once, as the last commit before merge."
+fi
+```
+
+`chmod +x` both scripts. Editing a hook *script* takes effect immediately (the hook re-execs it each turn); editing `settings.json` to add/remove a hook needs a `/hooks` open or restart to re-register.
 
 ---
 
