@@ -180,12 +180,23 @@ jobs:
             esac
           done <<< "$SUBJECTS"
 
+          # Emit the emoji sub-heads ONLY when the PR spans >1 commit type. release-drafter
+          # already files the PR under one category heading (🚀/🔧/🧰…), so for a single-type
+          # PR (every Dependabot chore, most human PRs) a matching sub-head just duplicates it.
+          groups=0
+          for g in "$BREAKING" "$FEAT" "$FIX" "$MAINT" "$OTHER"; do
+            [ -n "$g" ] && groups=$((groups + 1))
+          done
           BODY=""
-          [ -n "$BREAKING" ] && BODY="${BODY}  **🚨 Breaking**"$'\n'"${BREAKING}"
-          [ -n "$FEAT" ]     && BODY="${BODY}  **🚀 Features**"$'\n'"${FEAT}"
-          [ -n "$FIX" ]      && BODY="${BODY}  **🔧 Fixes**"$'\n'"${FIX}"
-          [ -n "$MAINT" ]    && BODY="${BODY}  **🧰 Maintenance**"$'\n'"${MAINT}"
-          [ -n "$OTHER" ]    && BODY="${BODY}  **📦 Other**"$'\n'"${OTHER}"
+          if [ "$groups" -le 1 ]; then
+            BODY="${BREAKING}${FEAT}${FIX}${MAINT}${OTHER}"
+          else
+            [ -n "$BREAKING" ] && BODY="${BODY}  **🚨 Breaking**"$'\n'"${BREAKING}"
+            [ -n "$FEAT" ]     && BODY="${BODY}  **🚀 Features**"$'\n'"${FEAT}"
+            [ -n "$FIX" ]      && BODY="${BODY}  **🔧 Fixes**"$'\n'"${FIX}"
+            [ -n "$MAINT" ]    && BODY="${BODY}  **🧰 Maintenance**"$'\n'"${MAINT}"
+            [ -n "$OTHER" ]    && BODY="${BODY}  **📦 Other**"$'\n'"${OTHER}"
+          fi
           [ -z "$BODY" ] && BODY="  - (no commits ahead of main)"
           echo "body<<EOF" >> $GITHUB_OUTPUT
           printf '%s' "$BODY" >> $GITHUB_OUTPUT
@@ -380,7 +391,7 @@ replacers:
     replace: ''
   - search: '/Dependabot will resolve[^\n]*\n?/g'
     replace: ''
-  - search: '/\/\/: # \(dependabot-start\)[\s\S]*?\/\/: # \(dependabot-end\)\s*/g'
+  - search: '/\[\/\/\]: # \(dependabot-start\)[\s\S]*?\[\/\/\]: # \(dependabot-end\)\s*/g'
     replace: ''
   - search: '/<br\s*\/?>\s*/g'
     replace: ''
@@ -1252,7 +1263,7 @@ exit 0
 >       replace: ''
 >     - search: '/Dependabot will resolve[^\n]*\n?/g'                                 # rebase boilerplate line
 >       replace: ''
->     - search: '/\/\/: # \(dependabot-start\)[\s\S]*?\/\/: # \(dependabot-end\)\s*/g' # command block (bounded by its markers)
+>     - search: '/\[\/\/\]: # \(dependabot-start\)[\s\S]*?\[\/\/\]: # \(dependabot-end\)\s*/g' # command block — markers are `[//]: # (...)`, brackets included
 >       replace: ''
 >     - search: '/<br\s*\/?>\s*/g'
 >       replace: ''
