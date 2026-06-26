@@ -167,9 +167,17 @@ jobs:
           }
           desc() { printf '%s' "$1" | sed -E 's/^[a-zA-Z]+(\([^)]*\))?!?:[[:space:]]*//'; }
 
+          # The manifest/plugin version-bump commit is release plumbing, not a changelog
+          # entry. Skip it: as a lone 'chore' it would otherwise spawn a 🧰 Maintenance
+          # section and, by adding a second commit type, trip the >1-type sub-head guard.
+          is_version_bump() {
+            printf '%s' "$1" | grep -qiE '^[a-z]+(\([^)]*\))?:[[:space:]]*bump\b.*(\bversion\b|\bmanifest\b|\bto v?[0-9]+\.[0-9]+)'
+          }
+
           BREAKING=""; FEAT=""; FIX=""; MAINT=""; OTHER=""
           while IFS= read -r s; do
             [ -z "$s" ] && continue
+            is_version_bump "$s" && continue
             d=$(desc "$s")
             case "$(classify "$s")" in
               breaking) BREAKING="${BREAKING}  - ${d}"$'\n' ;;
