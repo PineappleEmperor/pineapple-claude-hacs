@@ -73,6 +73,7 @@ Check the current working directory:
   > **AI assistance:** I'm a programmer; this project is built with AI (Claude, via Claude Code) for implementation, code review, and QA — under human direction, guided by my [`ha-integration`](https://github.com/PineappleEmperor/pineapple-claude-hacs) skill. Architecture and final review are mine; every change is human-reviewed before it merges.
   ```
 - `.gitignore`
+- `.githooks/commit-msg` — terse-commit + AI-trailer-rejection hook (see the Conventional Commits section); enable once per clone with `git config core.hooksPath .githooks` (document this in `CLAUDE.md`)
 - `custom_components/{domain}/brand/icon.svg` — placeholder 256×256 icon (source)
 - `custom_components/{domain}/brand/logo.svg` — placeholder logo, 2:1 ratio, transparent background (source)
 - `custom_components/{domain}/brand/icon.png` — **required by HACS brands validation**
@@ -179,12 +180,23 @@ jobs:
             esac
           done <<< "$SUBJECTS"
 
+          # Emit the emoji sub-heads ONLY when the PR spans >1 commit type. release-drafter
+          # already files the PR under one category heading (🚀/🔧/🧰…), so for a single-type
+          # PR (every Dependabot chore, most human PRs) a matching sub-head just duplicates it.
+          groups=0
+          for g in "$BREAKING" "$FEAT" "$FIX" "$MAINT" "$OTHER"; do
+            [ -n "$g" ] && groups=$((groups + 1))
+          done
           BODY=""
-          [ -n "$BREAKING" ] && BODY="${BODY}  **🚨 Breaking**"$'\n'"${BREAKING}"
-          [ -n "$FEAT" ]     && BODY="${BODY}  **🚀 Features**"$'\n'"${FEAT}"
-          [ -n "$FIX" ]      && BODY="${BODY}  **🔧 Fixes**"$'\n'"${FIX}"
-          [ -n "$MAINT" ]    && BODY="${BODY}  **🧰 Maintenance**"$'\n'"${MAINT}"
-          [ -n "$OTHER" ]    && BODY="${BODY}  **📦 Other**"$'\n'"${OTHER}"
+          if [ "$groups" -le 1 ]; then
+            BODY="${BREAKING}${FEAT}${FIX}${MAINT}${OTHER}"
+          else
+            [ -n "$BREAKING" ] && BODY="${BODY}  **🚨 Breaking**"$'\n'"${BREAKING}"
+            [ -n "$FEAT" ]     && BODY="${BODY}  **🚀 Features**"$'\n'"${FEAT}"
+            [ -n "$FIX" ]      && BODY="${BODY}  **🔧 Fixes**"$'\n'"${FIX}"
+            [ -n "$MAINT" ]    && BODY="${BODY}  **🧰 Maintenance**"$'\n'"${MAINT}"
+            [ -n "$OTHER" ]    && BODY="${BODY}  **📦 Other**"$'\n'"${OTHER}"
+          fi
           [ -z "$BODY" ] && BODY="  - (no commits ahead of main)"
           echo "body<<EOF" >> $GITHUB_OUTPUT
           printf '%s' "$BODY" >> $GITHUB_OUTPUT
@@ -379,7 +391,7 @@ replacers:
     replace: ''
   - search: '/Dependabot will resolve[^\n]*\n?/g'
     replace: ''
-  - search: '/\/\/: # \(dependabot-start\)[\s\S]*?\/\/: # \(dependabot-end\)\s*/g'
+  - search: '/\[\/\/\]: # \(dependabot-start\)[\s\S]*?\[\/\/\]: # \(dependabot-end\)\s*/g'
     replace: ''
   - search: '/<br\s*\/?>\s*/g'
     replace: ''
@@ -504,7 +516,9 @@ jobs:
         run: python -m pyright custom_components/
 ```
 
-**`.github/workflows/check-manifest-version.yml`** — version gate **against the last published release** (not `main` HEAD), de-anchored base parse (tolerates `rcN`), prerelease versions only need to differ, and **`dependabot[bot]` exempted on the failing steps** (skip the steps, not the job, to keep the check green-not-missing).
+**`.github/workflows/check-manifest-version.yml`** + **`scripts/manifest_gate.py`** + **`tests/test_manifest_gate.py`** — version gate **against the last published release** (not `main` HEAD). ⚠️ **The decision logic lives in a unit-tested Python script, NOT inline bash.** A real bug shipped from inline-bash logic: it used strict equality (`suggested == manifest`), so a `chore` PR sitting at `1.2.0` (riding a minor already merged this cycle) was rejected with "expected v1.1.1" — even though `1.2.0` is a perfectly valid in-cycle version. Inline gate logic is untested and regresses silently; extract it so it has a test suite. The gate must enforce a **floor** (≥ the label's minimum bump from the last release — catches under-bumps) **and** a **ceiling** (≤ the in-cycle version on `main`, or this PR's own label bump if it escalates the tier — catches over-bumps), with prerelease versions only needing to differ and `dependabot[bot]` exempt.
+
+The workflow just gathers inputs and shells out:
 ```yaml
 name: Check Manifest Version
 
@@ -517,7 +531,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
 
 jobs:
   check_version:
@@ -528,73 +542,182 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Resolve manifest path and PR version
-        id: manifest
-        run: |
-          MANIFEST=$(ls custom_components/*/manifest.json | head -1)
-          echo "path=$MANIFEST" >> "$GITHUB_OUTPUT"
-          echo "pr_version=$(jq -r '.version' "$MANIFEST")" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve last published release version
-        id: base
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG=$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName')
-          BASE="${TAG#v}"; [ -z "$BASE" ] && BASE="0.0.0"
-          echo "base_version=$BASE" >> "$GITHUB_OUTPUT"
-
-      - name: Compare
-        id: compare
-        run: |
-          BASE="${{ steps.base.outputs.base_version }}"
-          PR="${{ steps.manifest.outputs.pr_version }}"
-          echo "Last release: $BASE   manifest: $PR"
-          if [ "$BASE" = "$PR" ]; then echo "unchanged=true" >> "$GITHUB_OUTPUT"; else echo "unchanged=false" >> "$GITHUB_OUTPUT"; fi
-
-      - name: Determine bump from PR labels
-        id: bump
+      - name: Gather versions and labels
+        id: gather
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          LABELS=$(gh pr view ${{ github.event.pull_request.number }} --json labels -q '.labels[].name')
-          BASE="${{ steps.base.outputs.base_version }}"
-          PR="${{ steps.manifest.outputs.pr_version }}"
-          # de-anchored parse: a base carrying rcN still yields X.Y.Z
-          if [[ "$BASE" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
-            MAJOR="${BASH_REMATCH[1]}"; MINOR="${BASH_REMATCH[2]}"; PATCH="${BASH_REMATCH[3]}"
-          else
-            echo "❌ Cannot parse base version: $BASE"; exit 1
-          fi
-          # prerelease PR version only needs to differ from base -> skip the bump suggestion
-          if [[ "$PR" =~ (rc|alpha|beta|a|b|dev)[0-9]*$ ]]; then
-            echo "pr_is_prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "pr_is_prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
-          if   echo "$LABELS" | grep -qiE 'xfeat|xfeature|major'; then BUMP=xfeature; EXPECTED="v$((MAJOR+1)).0.0"
-          elif echo "$LABELS" | grep -qiE 'feat|feature';         then BUMP=feature;  EXPECTED="v$MAJOR.$((MINOR+1)).0"
-          elif echo "$LABELS" | grep -qiE 'fix|patch|chore';      then BUMP=fix;      EXPECTED="v$MAJOR.$MINOR.$((PATCH+1))"
-          else BUMP=none; EXPECTED=""
-          fi
-          echo "recommended=$BUMP" >> "$GITHUB_OUTPUT"
-          echo "suggested=$EXPECTED" >> "$GITHUB_OUTPUT"
+          MANIFEST=$(ls custom_components/*/manifest.json | head -1)
+          echo "pr_version=$(jq -r '.version' "$MANIFEST")" >> "$GITHUB_OUTPUT"
+          TAG=$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName')
+          echo "last_release=${TAG#v}" >> "$GITHUB_OUTPUT"
+          git fetch origin "$BASE_REF" --depth=1 -q || true
+          echo "main_version=$(git show "origin/$BASE_REF:$MANIFEST" 2>/dev/null | jq -r '.version' || echo '')" >> "$GITHUB_OUTPUT"
+          echo "labels=$(gh pr view ${{ github.event.pull_request.number }} --json labels -q '[.labels[].name]|join(",")')" >> "$GITHUB_OUTPUT"
 
-      # Failing steps skip dependabot[bot] (it never bumps the manifest; a no-bump PR
-      # right after a release equals the released version and would trip "unchanged").
-      # Skip the STEP, not the job — a skipped job can read as a missing required check.
-      - name: Fail if version unchanged vs last release
-        if: github.event_name == 'pull_request' && steps.compare.outputs.unchanged == 'true' && github.event.pull_request.user.login != 'dependabot[bot]'
+      # All decision logic lives in scripts/manifest_gate.py (unit-tested in
+      # tests/test_manifest_gate.py) so the gate can't silently regress again.
+      - name: Version gate
+        if: github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]'
         run: |
-          echo "❌ manifest version (${{ steps.manifest.outputs.pr_version }}) == last release; bump it (suggested ${{ steps.bump.outputs.suggested }})."
-          exit 1
+          python3 scripts/manifest_gate.py \
+            --last-release "${{ steps.gather.outputs.last_release }}" \
+            --main-version "${{ steps.gather.outputs.main_version }}" \
+            --pr-version "${{ steps.gather.outputs.pr_version }}" \
+            --labels "${{ steps.gather.outputs.labels }}"
+```
 
-      - name: Fail if version incorrect for label
-        if: github.event_name == 'pull_request' && steps.bump.outputs.pr_is_prerelease != 'true' && steps.bump.outputs.recommended != 'none' && steps.bump.outputs.suggested != format('v{0}', steps.manifest.outputs.pr_version) && github.event.pull_request.user.login != 'dependabot[bot]'
-        run: |
-          echo "❌ label implies ${{ steps.bump.outputs.recommended }} -> expected ${{ steps.bump.outputs.suggested }}, got v${{ steps.manifest.outputs.pr_version }}."
-          exit 1
+`scripts/manifest_gate.py` — pure `evaluate()` + thin CLI (add `"scripts/*" = ["T20", "INP001"]` to ruff `per-file-ignores`):
+```python
+"""Decide whether a PR's manifest version is a valid bump for its label."""
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+
+Version = tuple[int, int, int]
+_PRERELEASE = re.compile(r"(rc|alpha|beta|a|b|dev)[0-9]*$", re.IGNORECASE)
+
+
+def is_prerelease(version: str) -> bool:
+    return _PRERELEASE.search(version) is not None
+
+
+def parse_semver(version: str) -> Version:
+    match = re.match(r"^([0-9]+)\.([0-9]+)\.([0-9]+)", version)  # de-anchored: tolerate rcN
+    if not match:
+        raise ValueError(f"cannot parse version: {version!r}")
+    return int(match[1]), int(match[2]), int(match[3])
+
+
+def label_bump(labels: list[str]) -> str | None:
+    joined = " ".join(labels).lower()
+    if re.search(r"xfeat|xfeature|major", joined):
+        return "major"
+    if re.search(r"feat|feature|minor", joined):
+        return "minor"
+    if re.search(r"fix|patch|chore|bugfix|bug", joined):
+        return "patch"
+    return None
+
+
+def _bump(base: Version, tier: str) -> Version:
+    major, minor, patch = base
+    if tier == "major":
+        return (major + 1, 0, 0)
+    if tier == "minor":
+        return (major, minor + 1, 0)
+    return (major, minor, patch + 1)
+
+
+def _fmt(version: Version) -> str:
+    return "v{}.{}.{}".format(*version)
+
+
+def evaluate(last_release: str, main_version: str, pr_version: str,
+             labels: list[str], *, dependabot: bool = False) -> tuple[bool, str]:
+    if dependabot:
+        return True, "dependabot exempt"
+    base = parse_semver(last_release or "0.0.0")
+    if is_prerelease(pr_version):
+        if pr_version == last_release:
+            return False, f"prerelease v{pr_version} must differ from last release"
+        return True, "prerelease differs from last release"
+    pr = parse_semver(pr_version)
+    if pr == base:
+        # Graduating an rc line to its same-number final (2.0.0rc19 -> 2.0.0): the
+        # de-anchored parse makes both (x,y,z), but AwesomeVersion knows final > its
+        # own prerelease, so allow it instead of demanding a label-derived bump.
+        if is_prerelease(last_release):
+            return True, f"final v{pr_version} graduates prerelease {last_release}"
+        return False, f"manifest v{pr_version} == last release; bump it"
+    tier = label_bump(labels)
+    if tier is None:
+        return True, "no managed label; version only needs to differ from last release"
+    floor = _bump(base, tier)
+    if pr < floor:
+        return False, f"{tier} needs >= {_fmt(floor)}, got v{pr_version} (under-bumped)"
+    main = parse_semver(main_version) if main_version else floor
+    ceiling = max(floor, main)
+    if pr > ceiling:
+        return False, f"v{pr_version} exceeds the justified bump (expected <= {_fmt(ceiling)} for {tier})"
+    return True, "ok"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--last-release", required=True)
+    parser.add_argument("--main-version", default="")
+    parser.add_argument("--pr-version", required=True)
+    parser.add_argument("--labels", default="", help="comma-separated label names")
+    parser.add_argument("--dependabot", action="store_true")
+    args = parser.parse_args(argv)
+    labels = [label.strip() for label in args.labels.split(",") if label.strip()]
+    ok, reason = evaluate(args.last_release, args.main_version, args.pr_version,
+                          labels, dependabot=args.dependabot)
+    print(("✅ " if ok else "❌ ") + reason)
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+`tests/test_manifest_gate.py` — load the standalone script by path (it isn't an importable package) and cover the matrix, **including the regression that shipped** (chore riding an in-cycle minor) and the over-bump it must still catch:
+```python
+"""Unit tests for the manifest version gate decision logic."""
+from __future__ import annotations
+
+import importlib.util
+from pathlib import Path
+
+_SPEC = importlib.util.spec_from_file_location(
+    "manifest_gate", Path(__file__).parents[1] / "scripts" / "manifest_gate.py"
+)
+assert _SPEC and _SPEC.loader
+manifest_gate = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(manifest_gate)
+evaluate = manifest_gate.evaluate
+
+
+def ok(*args, **kwargs) -> bool:
+    return evaluate(*args, **kwargs)[0]
+
+
+def test_unchanged_vs_last_release_fails() -> None:
+    assert not ok("1.1.0", "1.1.0", "1.1.0", ["fix"])
+
+def test_feature_minor_bump_passes() -> None:
+    assert ok("1.1.0", "1.1.0", "1.2.0", ["feature"])
+
+def test_feature_only_patch_under_bumps() -> None:
+    assert not ok("1.1.0", "1.1.0", "1.1.1", ["feature"])
+
+def test_chore_rides_in_cycle_minor() -> None:  # the shipped regression
+    assert ok("1.1.0", "1.2.0", "1.2.0", ["chore"])
+
+def test_chore_overbump_beyond_cycle_fails() -> None:
+    assert not ok("1.1.0", "1.2.0", "2.0.0", ["chore"])
+
+def test_breaking_major_passes() -> None:
+    assert ok("1.1.0", "1.2.0", "2.0.0", ["xfeat"])
+
+def test_prerelease_only_needs_to_differ() -> None:
+    assert ok("1.1.0", "1.1.0", "2.0.0rc1", ["feature"])
+    assert not ok("2.0.0rc1", "2.0.0rc1", "2.0.0rc1", ["feature"])
+
+def test_final_graduates_prerelease() -> None:  # 2.0.0rc19 -> 2.0.0, even feature-labelled
+    assert ok("2.0.0rc19", "2.0.0rc20", "2.0.0", ["feature"])
+    assert not ok("2.0.0", "2.0.0", "2.0.0", ["feature"])  # already final -> still must bump
+
+def test_dependabot_exempt() -> None:
+    assert ok("1.1.0", "1.1.0", "1.1.0", [], dependabot=True)
+
+def test_no_managed_label_passes_when_changed() -> None:
+    assert ok("1.1.0", "1.1.0", "1.1.5", [])
 ```
 
 **`.github/dependabot.yml`** — `github-actions` is the real value; `pip` covers `requirements.test.txt` when pinned. `chore` prefix → autolabeler maps to patch.
@@ -1000,7 +1123,7 @@ The most dangerous test is the one that passes while the integration is broken. 
 
 **Unit-test the pure logic directly** — regex parsers, date/format extraction, data transforms (`order_parse`, `voucher_parse`, `sort_orders`, …) take a string/object and return a value with no HA and no mocks. They carry the highest regression risk and are the cheapest to cover; a parser with zero tests is a standing liability.
 
-**Minimum coverage before claiming a tier:** config-flow (happy path + each error + reauth/reconfigure), a real setup-entry `LOADED` test (plus a **two-entry parallel `LOADED`** test if multiple devices are allowed), coordinator success + auth-failure + the credential-read path against a mocked transport, unload, and a unit test per parser. Wire the regression test *first* on any bug fix: confirm it fails on the unpatched code, then fix.
+**Minimum coverage before claiming a tier:** config-flow (happy path + each error + reauth/reconfigure), a real setup-entry `LOADED` test (plus a **two-entry parallel `LOADED`** test if multiple devices are allowed), coordinator success + auth-failure + the credential-read path against a mocked transport, unload, and a unit test per parser. Wire the regression test *first* on any bug fix: confirm it fails on the unpatched code, then fix. **For Gold specifically, each rule gets a behavioural test (hassfest proves none of these):** reconfigure-success + reconfigure-error flow; diagnostics shape **and** redaction; `stale-devices` removal handler (`False` live / `True` gone); and a `translation_key`-resolution test that scrapes the keys used in code and asserts each exists in `strings.json`. A `done` without such a test is an unproven claim — see the *Prove the rule* note in the quality-scale section.
 
 **Prefer future-dated fixtures over freezing the clock.** For an end-to-end test that feeds a real captured payload (e.g. an `.eml`) through the mocked transport and asserts a sensor populates: if the payload has dates that must be "upcoming" for the integration to surface them, **shift the fixture's dates forward at runtime** (parse + rewrite, or template) rather than `freeze_time(...)`. Freezing the clock breaks anything that depends on the loop's time — most painfully it stops the **debouncer** that an `update_before_add` refresh relies on, so the entity never populates (state stays `unknown`), *and* it leaves a timer scheduled at the frozen wall-clock time that fails teardown. A live clock with future-dated data sidesteps both and keeps the fixture's real bytes/encoding.
 
@@ -1035,6 +1158,8 @@ rules:
 Valid statuses: `done`, `todo`, `exempt` (exempt requires a `comment`).
 
 **Scaffold `quality_scale.yaml` from the start** (even in Mode 2 on an existing integration that lacks it) and treat it as the definition-of-done — don't discover rules by hitting them. **hassfest gotchas:** the file must list **every** canonical rule with a valid status, `exempt` **must** carry a `comment`, and **only add `"quality_scale": "<tier>"` to `manifest.json` once every rule up to that tier is `done`/`exempt`** — claiming a tier makes hassfest enforce it (a single `todo` at/below that tier fails CI). So: ship the yaml as a tracking ledger first, omit the manifest tier until a tier is fully met.
+
+⚠️ **Prove the rule, don't just claim it — hassfest checks structure, not behaviour.** A green hassfest + a `done` in `quality_scale.yaml` only proves the file is well-formed and the manifest tier is a valid enum; hassfest **never runs the integration**, so it cannot tell you `diagnostics.py` actually redacts, the reconfigure flow works, `async_remove_config_entry_device` returns correctly, or that a `translation_key` used in code resolves in `strings.json`. (For HA core those rules are enforced by human reviewers; for a custom integration nothing enforces them.) So **every rule you mark `done` must have a test that exercises it** — marking `done` off code-presence alone is "claiming compliance" without showing it. Concretely, each of these needs its own test, not just the code: `reconfiguration-flow` (a reconfigure-success + reconfigure-error flow test), `diagnostics` (asserts the payload shape **and** that secrets are `**REDACTED**`), `stale-devices` (`async_remove_config_entry_device` → `False` while the device is live, `True` once it's gone), `exception-translations`/`entity-translations`/`icon-translations` (a test that scrapes the `translation_key`s used in code and asserts each exists in `strings.json` — catches a typo'd key that hassfest passes). If a rule is genuinely untestable, it should be `exempt` with a comment, not an unproven `done`.
 
 **Canonical rule set (cached 2026-06; re-verify at developers.home-assistant.io/docs/core/integration-quality-scale/ — rules change).** All must appear in `quality_scale.yaml`:
 - **Bronze:** `action-setup`, `appropriate-polling`, `brands`, `common-modules`, `config-flow-test-coverage`, `config-flow`, `dependency-transparency`, `docs-actions`, `docs-high-level-description`, `docs-installation-instructions`, `docs-removal-instructions`, `entity-event-setup`, `entity-unique-id`, `has-entity-name`, `runtime-data`, `test-before-configure`, `test-before-setup`, `unique-config-entry`
@@ -1071,6 +1196,51 @@ Common `exempt`s for a local-push MQTT device integration: `appropriate-polling`
 
 **No AI-attribution trailers.** Don't append `Co-Authored-By: Claude`, tool/session links, or any "generated with…" line to commits — keep the authorship history clean. (If a harness injects such trailers by default, strip them.) A `Co-Authored-By:` for a *real* human collaborator is fine.
 
+⚠️ **Enforce the trailer ban with a `commit-msg` hook — prose alone isn't enough.** A coding harness can inject `Co-Authored-By: Claude` / `Claude-Session:` on *every* commit via a standing instruction, which fights this rule turn after turn; the agent keeps "remembering" the harness default over the skill and regresses. The fix is deterministic enforcement at the git layer, not memory. Ship `.githooks/commit-msg` (terse-subject + no-narrative-body + **AI-trailer rejection**), add it to the scaffold's repo-root files, and tell contributors to enable it once per clone in `CLAUDE.md`: `git config core.hooksPath .githooks`.
+```bash
+#!/usr/bin/env bash
+# Enforce terse commits: subject <=72 chars, no narrative body, no AI-attribution trailers.
+# Body lines allowed only as trailers (Key: value), Closes/Refs/Fixes #N, or any body when a
+# BREAKING CHANGE footer is present. Enable once per clone: git config core.hooksPath .githooks
+msg_file="$1"
+subject="$(grep -v '^#' "$msg_file" | sed -n '1p')"
+
+if [ "${#subject}" -gt 72 ]; then
+  echo "commit-msg: subject is ${#subject} chars (>72). Keep it terse." >&2
+  exit 1
+fi
+case "$subject" in "Merge "*|"Revert "*|"fixup! "*|"squash! "*) exit 0 ;; esac
+
+# Reject harness-injected AI-attribution trailers (this skill bans them). A real human
+# Co-Authored-By is still fine.
+if grep -v '^#' "$msg_file" | grep -Eqi '^Co-authored-by:[[:space:]]*Claude|^Claude-Session:|Generated with .*(Claude|Anthropic)'; then
+  echo "commit-msg: AI-attribution trailer not allowed (strip Co-Authored-By: Claude / Claude-Session)." >&2
+  exit 1
+fi
+
+if grep -q 'BREAKING CHANGE' "$msg_file"; then
+  exit 0
+fi
+
+bad=""
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  case "$line" in \#*) continue ;; esac
+  printf '%s' "$line" | grep -Eq '^[A-Za-z][A-Za-z-]*: ' && continue
+  printf '%s' "$line" | grep -Eq '^(Closes|Refs|Fixes|Resolves) #' && continue
+  bad="$line"
+  break
+done < <(grep -v '^#' "$msg_file" | tail -n +2)
+
+if [ -n "$bad" ]; then
+  echo "commit-msg: narrative body line not allowed:" >&2
+  echo "    $bad" >&2
+  echo "Keep commits subject-only; put detail in the PR / release notes." >&2
+  exit 1
+fi
+exit 0
+```
+
 **Put the narrative in the release, not the commit.** The human-readable "what changed and why it matters" belongs in the **PR description / release notes** (surfaced by release-drafter / `generate_release_notes`), which is where users actually read it. Keep commits terse; write the detail once, in the release description.
 
 **Match release-drafter when writing the PR body.** If `change-template` includes `$BODY`, the PR description is inlined **under** its category heading (e.g. `### 🚀 Features`). So the body must nest cleanly: use **bold emoji sub-heads** (`**🧩 Engine**`), not `#`/`##` — top-level headings render bigger than the category and clash. Mirror the config's emoji category style, and label the PR so it lands in the intended category (e.g. a `major`/`xfeature` label → 🚨 Breaking Change). Note release-drafter draws the PR body via the GraphQL path; `gh pr edit` can fail on the Projects-classic deprecation — set title/body via `gh api -X PATCH repos/{o}/{r}/pulls/{n} -f title=… -F body=@file` instead.
@@ -1093,7 +1263,7 @@ Common `exempt`s for a local-push MQTT device integration: `appropriate-polling`
 >       replace: ''
 >     - search: '/Dependabot will resolve[^\n]*\n?/g'                                 # rebase boilerplate line
 >       replace: ''
->     - search: '/\/\/: # \(dependabot-start\)[\s\S]*?\/\/: # \(dependabot-end\)\s*/g' # command block (bounded by its markers)
+>     - search: '/\[\/\/\]: # \(dependabot-start\)[\s\S]*?\[\/\/\]: # \(dependabot-end\)\s*/g' # command block — markers are `[//]: # (...)`, brackets included
 >       replace: ''
 >     - search: '/<br\s*\/?>\s*/g'
 >       replace: ''
@@ -1157,6 +1327,7 @@ The `!`-breaking branch must come first (else `feat!` matches the `feat` arm). T
 **Prerelease (rc) cycle:** release candidates are published via the GitHub **prerelease flag** + a `v…-rcN` tag; the manifest carries a matching **PEP440 prerelease** (`2.0.0rc1`) which `AwesomeVersion`/hassfest/HACS accept (`2.0.0 > 2.0.0rc1`). Two rules that bit hard:
 - **rc numbers track *published* candidates, not PRs.** You only increment `rc1`→`rc2` when you actually cut a new published rc; you do **not** invent `rc2`/`rc3` per-PR to satisfy the gate. The version stays frozen at the current rc across iteration; it changes only as the pre-merge bump to the version being published.
 - **A prerelease deliberately changes gate behaviour:** a prerelease version only needs to *differ from base* — so the gate must **skip** the label-derived "incorrect version" suggestion when the PR version matches `(rc|alpha|beta|a|b|dev)[0-9]*$` (otherwise a `feature`-labelled `2.0.0rc1` PR fails, demanding `v2.1.0`). Also de-anchor the base parse (`^([0-9]+)\.([0-9]+)\.([0-9]+)` without `$`) so a base that already carries `rcN` still parses. This is the *only* prerelease gate change needed — do **not** add per-PR rc-increment logic or relax the "differ from base" rule.
+- **Graduating off rc to the same-number final is a legitimate bump the gate must allow.** Coming off the rc line (`2.0.0rc19` → **`2.0.0`** final) is the natural cycle close, but the de-anchored parse makes `2.0.0rc19` and `2.0.0` both `(2,0,0)`, so a naive `pr == base` check (and a `feature` label demanding `v2.1.0`) **wrongly rejects the graduation** — even though `AwesomeVersion` knows `2.0.0 > 2.0.0rc19`. The gate special-cases it: when the PR version is final, equals the base tuple, **and** the last release was a prerelease, pass it ("final graduates its own prerelease"); a `pr == base` where the last release was already *final* still fails (real unchanged version). Covered by `test_final_graduates_prerelease`.
 
 **Compare the gate against the last published *release*, not `main` HEAD.** Comparing to `main` forces **every** PR to bump beyond the previous merged PR, so versions inflate per-PR (rc4, rc5, rc6…) with no release between them. Instead resolve the base from the latest published release tag — `gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName'`, strip the leading `v` — and pass only when the manifest version **differs from that**. Now several unreleased PRs can sit at the same in-progress version (the first PR of a cycle bumps `main` once; later PRs ride it), and the single bump folds into whatever release is cut next. A PR that doesn't change the manifest still passes as long as `main` is already ahead of the last release — which it is, mid-cycle.
 
