@@ -73,16 +73,16 @@ Check the current working directory:
   > **AI assistance:** I'm a programmer; this project is built with AI (Claude, via Claude Code) for implementation, code review, and QA — under human direction, guided by my [`ha-integration`](https://github.com/PineappleEmperor/pineapple-claude-hacs) skill. Architecture and final review are mine; every change is human-reviewed before it merges.
   ```
 - `.gitignore`
-- `custom_components/{domain}/brand/icon.svg` — placeholder 256×256 icon (source)
-- `custom_components/{domain}/brand/logo.svg` — placeholder logo, 2:1 ratio, transparent background (source)
-- `custom_components/{domain}/brand/icon.png` — **required by HACS brands validation**
-- `custom_components/{domain}/brand/logo.png` — include for completeness
+- `custom_components/{domain}/brand/icon.png` — **256×256**, required by HACS brands validation
+- `custom_components/{domain}/brand/icon@2x.png` — **512×512** (see HiDPI note below)
+- `custom_components/{domain}/brand/logo.png` — landscape, shortest side **128–256**
+- `custom_components/{domain}/brand/logo@2x.png` — landscape, shortest side **256–512**
 
-Generate PNGs from SVGs:
-```
-convert -background none -density 144 custom_components/{domain}/brand/icon.svg custom_components/{domain}/brand/icon.png
-convert -background none -density 144 custom_components/{domain}/brand/logo.svg custom_components/{domain}/brand/logo.png
-```
+> **Brand assets are served from the integration's own `brand/` folder since HA 2026.3.0** (via the Brands Proxy API). The `home-assistant/brands` CDN `custom_integrations/` folder is **legacy** — do not rely on it for new work. Files are PNG, lossless; transparent background for wordmark/logo art (an LED-screen/device screenshot keeps its black background — that's the device, not a missing alpha).
+>
+> ⚠️ **Ship the `@2x` variants or the icon flickers/fails on HiDPI.** The most common "icon shows only sometimes" bug is a present `icon.png` with **no `icon@2x.png`**: a Retina/zoomed client requests `@2x`, 404s, and falls back inconsistently. `icon@2x.png` (512²) and `logo@2x.png` are not optional. Exact, square sizes matter — an off-spec `icon.png` (e.g. 384²) also misbehaves.
+>
+> **Sources:** a placeholder may start as an SVG rasterised with `cairosvg` (ImageMagick's MSVG renderer botches text) or `convert -background none -density 144 in.svg out.png`. But the asset can equally be a **crisp nearest-neighbour upscale of a real device render** — for a pixel display this is the strongest branding. Pick by where HA shows it: the **logo** renders large (integration page / HACS) so a busy/detailed screen reads well; the **icon** renders small (~48px in the integrations list) so use a **simple, low-detail** screen (fewer, fatter pixels survive the shrink) — a full text-heavy screen turns to mush. Generate the PNG straight from the byte-faithful preview (`render_layout_png(..., scale=N)`), not a photo.
 
 > HACS `check-brands` fails if `custom_components/{domain}/brand/icon.png` is absent and the integration is not listed in the HA brands repo.
 
