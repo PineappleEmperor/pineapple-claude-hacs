@@ -1,5 +1,5 @@
 ---
-description: Create, modify, and lint Home Assistant custom integrations — custom_components packages, manifest.json, config/options/reauth/reconfigure flows, coordinator + entity platforms, services, diagnostics, quality_scale.yaml — targeting Platinum quality scale. Use before writing or modifying any HA integration code; re-invoke after /compact.
+description: Create, modify, lint, and triage Home Assistant custom integrations — custom_components packages, manifest.json, config/options/reauth/reconfigure flows, coordinator + entity platforms, services, diagnostics, quality_scale.yaml — targeting Platinum quality scale. Also triages HA logs (Mode 5). Use before writing or modifying any HA integration code or reading a HA log; re-invoke after /compact.
 ---
 
 # Home Assistant Integration Assistant
@@ -22,6 +22,7 @@ Help create, modify, and lint Home Assistant custom integrations targeting **pla
 Check the current working directory:
 - No `custom_components/` → default to **Scaffold**
 - `custom_components/` exists → ask: **Scaffold** new integration / **Modify** existing / **Lint & quality check** / **Audit** (verify the skill was actually followed — see Mode 4)?
+- The task is reading/triaging a **HA log** (a `home-assistant.log`, a Settings → System → Logs download, or a copied log dump) → **Log triage** (Mode 5) — regardless of `custom_components/` presence.
 
 ---
 
@@ -1548,3 +1549,71 @@ Add `"scripts/*" = ["T20", "INP001"]` to ruff `per-file-ignores` if any audit he
 - **Commit/PR discipline:** subjects are single tight imperatives; the PR was opened by `create-dev-pr`, not hand-created; the version bumped once vs the last release per the type label.
 
 **Report:** per-item pass/fail with `file:line` evidence · what the mechanical gate caught · remaining manual work. Fix findings before claiming the tier.
+
+---
+
+## Mode 5 — Log triage
+
+Triage a Home Assistant log (`home-assistant.log`, a copied `.md`/`.txt` dump, or the **Settings → System → Logs** download). Goal: turn thousands of lines into a short ranked list of *actionable* issues, separating real bugs from the constant background noise HA emits. **A raw error count is meaningless** — one slow client can emit 1000+ identical lines; one config typo emits one. Rank by distinct root cause, not by line count.
+
+### Step 1 — Build (or load) the device inventory FIRST
+
+Logs identify clients/devices by **opaque tokens** — an IP, a browser user-agent, a Z-Wave `node_id`, a `notify.mobile_app_*` slug, a UniFi/camera hostname. Triage stalls every time on "what *is* `192.168.13.179`?". Resolve it **once**, up front, into a persistent map so every future triage is instant.
+
+**The map is user/environment-specific — it does NOT belong in this (shareable) skill repo.** Keep it in a **local, git-ignored file next to the logs** (e.g. `device_map.md` in the log directory) or in Claude auto-memory. Never commit a home's IP/device layout to a public repo.
+
+**Up-front Q&A** — when no map exists, extract the distinct tokens from the log and ask the user to name each once:
+
+```bash
+# Web/app clients: IP + device fingerprint (SM-X210 = Galaxy Tab, KFTRPWI = Amazon Fire, etc.)
+grep -oE "from [0-9.]+ \(Mozilla[^)]*Build/[^ ;]+" LOG | sort -u
+# All LAN IPs by frequency
+grep -oE "192\.168\.[0-9]+\.[0-9]+" LOG | sort | uniq -c | sort -rn
+# Named device tokens worth resolving
+grep -oE "mobile_app_[a-z0-9_]+|node_id=[0-9]+|notify\.[a-z0-9_]+" LOG | sort | uniq -c | sort -rn
+```
+
+Then ask the user to fill **device · room/owner · role** for each token. Store as a table:
+
+```markdown
+| Token | Device | Room / owner | Role |
+|-------|--------|--------------|------|
+| 192.168.13.179 (SM-X210) | Galaxy Tab A9+ | Kitchen | Wall dashboard |
+| node_id=3 | Z-Wave keypad | Front door | Alarmo front pinpad |
+| notify.mobile_app_caracal2 | Phone | (owner) | Alarm notifications |
+```
+
+Decode common fingerprints without asking: `SM-*` = Samsung Galaxy (Tab/phone), `KF*`/`Build/PS*` = Amazon Fire, `Pixel*` = Google Pixel, `iPad`/`iPhone` = Apple. Ask only for room/role.
+
+### Step 2 — Aggregate by logger, not by line
+
+```bash
+grep -oE "(ERROR|WARNING) \([^)]+\) \[[^]]+\]" LOG | sort | uniq -c | sort -rn
+```
+
+Collapse each logger cluster to one row. Then read **one representative line** per cluster — not all of them.
+
+### Step 3 — Classify each cluster: noise vs actionable
+
+**Known noise — acknowledge once, do not chase:**
+
+| Pattern | Why it's noise |
+|---------|----------------|
+| `[homeassistant.loader] We found a custom integration X which has not been tested` | Boot banner, **one per HACS integration**, every restart. Count ≈ number of custom integrations. Benign. |
+| `[websocket_api.http.connection] ... Reached 4096 pending messages` | A **single slow client** can't drain the state_changed queue — almost always a tablet/dashboard right after restart. Check it's **one IP** over a **bounded window** (resolve the IP via the map). Self-heals on reconnect. Burst at boot = client weight, not a code bug; *continuous* = genuinely overloaded dashboard (trim history-graph / auto-entities cards). |
+| `[snitun.*]`, `ClientConnectionResetError`, `Task exception was never retrieved` | Nabu Casa Cloud / network transients. Ignore unless frequent + correlated with an outage. |
+| transient device fetch (`spotify`, `apple_tv`/`pyatv`, weather) | One-off API/device blips. Ignore unless sustained — sustained → that integration's reauth/availability. |
+
+**Actionable — real bugs to fix:**
+
+- **`extra keys not allowed @ data['<key>']`** in a script/automation `call_service` → a **service-schema deprecation**. The big recurring one: `light.turn_on` dropped **`color_temp`** → use **`color_temp_kelvin`** (kelvin = `1000000 / mired`). Also `white_value` (removed), `effect` keys that moved. Grep config for the dead key and replace.
+- **`Action notify.mobile_app_* not found`** / **`Service … not found`** → a referenced entity/service was renamed or its device removed (re-onboarded phone, deleted integration). Update the automation/Alarmo action to the current slug.
+- **Z-Wave `NotFoundError: Value N-CC-… not found on node Node(node_id=N)`** → a `zwave_js.set_value` targets a value id the node no longer exposes (re-interview, firmware change, wrong endpoint). Resolve `node_id` via the map, re-check the value id in the device's Z-Wave page.
+- **`Bad credentials` / auth errors** (`github`, etc.) → expired token/PAT. Reconfigure that integration.
+- **Anything under `custom_components.<your_domain>`** → your code. Trace it (publish→subscribe→handler) per the Debugging discipline section; this is the only cluster the rest of this skill directly acts on.
+
+### Step 4 — Report
+
+Ranked table: **severity · cluster · root cause · fix · evidence (`timestamp` / `file:line`)**. State explicitly which clusters are *known noise* (so the user stops worrying about a scary count) and which are *actionable*. Resolve every opaque token through the device map so the report reads in plain device names ("Kitchen wall tablet", not `192.168.13.179`). If a fix is config-side (scripts/automations/integration settings) and you only have the log, say so and offer to apply it once given the config path.
+
+> **Scope note:** most HA log errors are **config / automation / external-device** issues, *not* custom-integration code — Mode 5 triages and routes them, but the editing patterns in this skill apply only to the `custom_components.<your_domain>` cluster. Don't add a home's specific errors to this skill; add only a **new reusable noise/actionable *pattern*** here when one recurs across triages.
