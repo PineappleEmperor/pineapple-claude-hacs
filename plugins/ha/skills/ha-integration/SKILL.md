@@ -21,7 +21,7 @@ Help create, modify, and lint Home Assistant custom integrations targeting **pla
 
 Check the current working directory:
 - No `custom_components/` → default to **Scaffold**
-- `custom_components/` exists → ask: **Scaffold** new integration / **Modify** existing / **Lint & quality check**?
+- `custom_components/` exists → ask: **Scaffold** new integration / **Modify** existing / **Lint & quality check** / **Audit** (verify the skill was actually followed — see Mode 4)?
 
 ---
 
@@ -117,6 +117,8 @@ The `description`, `issues`, and `topics` checks fail silently until the first `
 - `.github/workflows/hassfest_validate.yml`
 - `.github/workflows/python_validate.yml` — **pin the matrix to HA's current minimum Python** (as of 2026-06, `["3.14"]` — HA dev requires 3.14.2+; `pip install homeassistant` refuses older). Test the *floor* HA supports, and re-check it at developers.home-assistant.io/docs/development_environment when HA bumps. Keep this in lockstep with `pyproject.toml` ruff `target-version = "py314"` and pylint `py-version = "3.14"`, and `pyrightconfig.json`.
 - `.github/workflows/check-manifest-version.yml`
+- `.github/workflows/quality_audit.yml` — runs `scripts/skill_audit.sh` on every PR to mechanically enforce skill conformance (workflows present, action pins current, antipatterns absent). See **Mode 4 — Audit**.
+- `scripts/skill_audit.sh` — the mechanical conformance check (run locally before claiming done; CI runs it too).
 - `.github/pr-labeler.yml`
 - `.github/release-drafter.yml` — autolabeler rules are **title-only** (no `branch:` rules). The release-drafter autolabeler can only match title/body/branch/files (never commit subjects), so label off the **title** — which `create-dev-pr` already derives from the commits. Keep it the one-and-only labeler; don't also label in `create-dev-pr.yml`.
 - `.github/dependabot.yml` — see the **Dependabot** section below.
@@ -1447,3 +1449,102 @@ Apply the same patterns and code style as Mode 1.
 3. Check `quality_scale.yaml` exists; if not, offer to create it
 4. Check `manifest.json` — correct `documentation` URL pointing to the repo, keys in order (`domain`, `name`, then alphabetical)
 5. Report: files changed · issues fixed · issues intentionally suppressed (with rationale) · remaining manual work
+
+---
+
+## Mode 4 — Audit (skill conformance)
+
+**Why this is separate from lint.** Mode 3 (lint) answers *is the code hygienic* — ruff/pyright/manifest order, tool-driven. Mode 4 answers *was this skill actually followed* — are the canonical workflows present and correct, the documented patterns applied, the antipatterns gone, `quality_scale.yaml` honest. The skill has repeatedly been *used* while specific items were missed (stale action pins, a deprecated notify path, an optimistic `exempt`, a hand-created PR). Lint can't catch those; the audit does. **Run it before claiming a tier and before merge — it's part of definition-of-done.**
+
+**Two layers, because a checklist you must remember to run gets skipped:**
+1. **Mechanical gate (`scripts/skill_audit.sh`, enforced by `quality_audit.yml` on every PR).** Greps the high-confidence, machine-checkable subset and fails CI on any violation. This is what *stops* regressions — it can't be forgotten.
+2. **Judgement checklist (below).** The items a grep can't decide — run these by reading the code.
+
+### Mechanical gate — `scripts/skill_audit.sh`
+
+```bash
+#!/usr/bin/env bash
+# Skill-conformance audit: verifies the ha-integration skill was actually followed —
+# canonical workflows present, action pins current, antipatterns absent, quality_scale
+# present. Mechanical subset of Mode 4. Exit 1 on any FAIL. Runs locally and in CI.
+set -uo pipefail
+
+CC=$(ls -d custom_components/*/ 2>/dev/null | head -1)
+fail=0
+FAIL() { echo "❌ FAIL: $*"; fail=1; }
+WARN() { echo "⚠️  WARN: $*"; }
+
+# --- Canonical workflows present ---
+for w in create-dev-pr pr-labeler release_drafter semantic_release lint_pr \
+         hacs_validate hassfest_validate python_validate check-manifest-version; do
+  [ -f ".github/workflows/$w.yml" ] || FAIL "missing .github/workflows/$w.yml"
+done
+[ -f .github/release-drafter.yml ] || FAIL "missing .github/release-drafter.yml"
+[ -f .github/dependabot.yml ]      || FAIL "missing .github/dependabot.yml"
+
+# --- Action pins current (stale majors Dependabot would immediately bump) ---
+grep -rnE 'actions/checkout@v[1-6]\b'                 .github/workflows/ && FAIL "stale actions/checkout (use v7)"
+grep -rnE 'actions/setup-python@v[1-5]\b'             .github/workflows/ && FAIL "stale actions/setup-python (use v6)"
+grep -rnE 'softprops/action-gh-release@v[12]\b'       .github/workflows/ && FAIL "stale action-gh-release (use v3)"
+grep -rnE 'amannn/action-semantic-pull-request@v[1-5]\b' .github/workflows/ && FAIL "stale semantic-pull-request (use v6)"
+
+# --- Workflow correctness ---
+grep -q "Remove superseded" .github/workflows/pr-labeler.yml 2>/dev/null \
+  || FAIL "pr-labeler.yml missing the removal-only superseded-label step"
+grep -q "dependabot\[bot\]" .github/workflows/check-manifest-version.yml 2>/dev/null \
+  || WARN "check-manifest-version may not exempt dependabot[bot]"
+grep -q "gh release list" .github/workflows/check-manifest-version.yml 2>/dev/null \
+  || WARN "check-manifest-version may not compare against the last published release"
+
+# --- Antipatterns in integration code (high-confidence) ---
+if [ -n "$CC" ]; then
+  ap() { grep -rnE "$1" "$CC" 2>/dev/null && FAIL "$2"; }
+  ap 'discovery\.async_load_platform' "deprecated discovery.async_load_platform (use NotifyEntity / platform forward)"
+  ap 'BaseNotificationService'         "deprecated BaseNotificationService (use NotifyEntity)"
+  ap 'update_before_add=True'          "update_before_add=True (populate via property or _handle_coordinator_update)"
+  ap 'OptionsFlowHandler'              "deprecated OptionsFlowHandler name (use OptionsFlow)"
+  ap 'PlatformNotReady'                "PlatformNotReady in a config-entry integration (use ConfigEntryNotReady)"
+  ap '_LOGGER\.[a-z]+\([[:space:]]*f"' "f-string in a logging call (use lazy % args — ruff G004)"
+  ti=$(grep -rn '# type: ignore' "$CC" 2>/dev/null | grep -v 'import-untyped')
+  [ -n "$ti" ] && { echo "$ti"; FAIL "bare # type: ignore (Platinum: only [import-untyped] with a reason)"; }
+  grep -rq 'from __future__ import annotations' "$CC"__init__.py 2>/dev/null \
+    || WARN "no 'from __future__ import annotations' in __init__.py"
+
+  # --- quality_scale + manifest honesty ---
+  [ -f "${CC}quality_scale.yaml" ] || FAIL "missing quality_scale.yaml"
+  M="${CC}manifest.json"
+  grep -q '"integration_type"' "$M" 2>/dev/null || FAIL "manifest.json missing integration_type"
+  grep -q '"issue_tracker"'    "$M" 2>/dev/null || FAIL "manifest.json missing issue_tracker (HACS requires it)"
+fi
+
+[ "$fail" = 0 ] && { echo "✅ skill audit passed"; exit 0; } || { echo "skill audit FAILED"; exit 1; }
+```
+
+`.github/workflows/quality_audit.yml`:
+```yaml
+name: Skill Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash scripts/skill_audit.sh
+```
+
+Add `"scripts/*" = ["T20", "INP001"]` to ruff `per-file-ignores` if any audit helper is Python (the bash script needs no ignore). When the skill adds a new antipattern or canonical workflow, **add the matching check here** — the gate is only as current as its rules.
+
+### Judgement checklist (read the code — a grep can't decide these)
+
+- **Workflows behave, not just exist:** `create-dev-pr` trims the title with `xargs`, has `concurrency` + 0-ahead skip, and no label step; `release_drafter` is push-only with no second autolabeler; `check-manifest-version` compares to the **last published release** and exempts `dependabot[bot]` on the *failing steps*.
+- **Patterns applied:** `runtime_data` (not `hass.data[DOMAIN][entry_id]`) for entry state; coordinator `async_shutdown()` on unload; `async_remove_config_entry_device` present if the integration creates a device; `DeviceInfo` TypedDict; `_attr_has_entity_name = True`; typed `ConfigEntry` alias; modern `NotifyEntity` (or a directly-registered service for custom `data`).
+- **`quality_scale.yaml` honest:** every canonical rule listed; every `exempt` carries a real `comment`; no optimistic `exempt` masking a gap (e.g. `stale-devices` exempt while a device *is* created); the `manifest.json` tier claimed only when every rule at/below it is `done`/`exempt`.
+- **Tests mock the boundary:** a real setup-entry `LOADED` test exists (not just `async_setup_component`); the transport is mocked, not the integration's own functions; a two-entry parallel `LOADED` test exists if multiple devices are allowed; parsers have unit tests.
+- **Commit/PR discipline:** subjects are single tight imperatives; the PR was opened by `create-dev-pr`, not hand-created; the version bumped once vs the last release per the type label.
+
+**Report:** per-item pass/fail with `file:line` evidence · what the mechanical gate caught · remaining manual work. Fix findings before claiming the tier.
