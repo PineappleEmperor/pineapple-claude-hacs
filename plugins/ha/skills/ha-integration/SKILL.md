@@ -21,7 +21,7 @@ Help create, modify, and lint Home Assistant custom integrations targeting **pla
 
 Check the current working directory:
 - No `custom_components/` → default to **Scaffold**
-- `custom_components/` exists → ask: **Scaffold** new integration / **Modify** existing / **Lint & quality check**?
+- `custom_components/` exists → ask: **Scaffold** new integration / **Modify** existing / **Lint & quality check** / **Audit** (verify the skill was actually followed — see Mode 4)?
 
 ---
 
@@ -64,7 +64,7 @@ Check the current working directory:
   `/compact`, since compaction can drop the skill's guidance from context.
   ```
   (A user may *additionally* wire personal `SessionStart` + `UserPromptSubmit` hooks in their own `~/.claude/settings.json` to re-arm the rule and anchor the CI conventions per-turn — see the *Optional: per-turn reminder hooks* appendix below for the full recipe. That's a personal convenience; the canonical, shareable enforcement still lives in the repo's `CLAUDE.md`.)
-- `hacs.json` — minimal content: `{"name": "My Integration"}` (HACS only strictly requires `name`; add `"homeassistant": "2024.1.0"` for minimum HA version)
+- `hacs.json` — `name` is the only strict requirement, but the canonical setup ships a **zip release**: `{"name": "My Integration", "content_in_root": false, "zip_release": true, "filename": "<domain>.zip"}` (add `"homeassistant": "2024.1.0"` for a minimum HA version). `zip_release` makes HACS download a release **asset** named `<filename>` instead of the tag source archive — so it **requires** the `release.yml` *Create Release ZIP* workflow (below) to build and attach that asset on every published release. **Without that workflow, HACS install fails with `Could not download`** (the symptom of a `zip_release` repo whose release has no attached zip). Drop `zip_release`/`filename` only if you deliberately want HACS to pull the whole tagged repo archive instead.
 - `pyproject.toml`
 - `pyrightconfig.json`
 - `README.md` — **include the AI-assistance disclaimer** as a GitHub `> [!NOTE]` admonition box. Link the skill name to its public repo. Template:
@@ -74,16 +74,18 @@ Check the current working directory:
   ```
 - `.gitignore`
 - `.githooks/commit-msg` — terse-commit + AI-trailer-rejection hook (see the Conventional Commits section); enable once per clone with `git config core.hooksPath .githooks` (document this in `CLAUDE.md`)
-- `custom_components/{domain}/brand/icon.svg` — placeholder 256×256 icon (source)
-- `custom_components/{domain}/brand/logo.svg` — placeholder logo, 2:1 ratio, transparent background (source)
-- `custom_components/{domain}/brand/icon.png` — **required by HACS brands validation**
-- `custom_components/{domain}/brand/logo.png` — include for completeness
+- `custom_components/{domain}/brand/icon.png` — **256×256**, required by HACS brands validation
+- `custom_components/{domain}/brand/icon@2x.png` — **512×512** (see HiDPI note below)
+- `custom_components/{domain}/brand/logo.png` — landscape, shortest side **128–256**
+- `custom_components/{domain}/brand/logo@2x.png` — landscape, shortest side **256–512**
 
-Generate PNGs from SVGs:
-```
-convert -background none -density 144 custom_components/{domain}/brand/icon.svg custom_components/{domain}/brand/icon.png
-convert -background none -density 144 custom_components/{domain}/brand/logo.svg custom_components/{domain}/brand/logo.png
-```
+> **Brand assets are served from the integration's own `brand/` folder since HA 2026.3.0** (via the Brands Proxy API). The `home-assistant/brands` CDN `custom_integrations/` folder is **legacy** — do not rely on it for new work. Files are PNG, lossless; transparent background for wordmark/logo art (an LED-screen/device screenshot keeps its black background — that's the device, not a missing alpha).
+>
+> ⚠️ **The HACS store/search dashboard still reads the legacy `data-v2.hacs.xyz` (which mirrors the old brands CDN), NOT the inline `brand/` folder.** So an integration that ships *only* inline brand images — i.e. one that never got a `home-assistant/brands` entry, and now **can't** (brands auto-closes `custom_integrations/*` PRs) — renders **blank in the HACS dashboard** even though HA's own UI shows the icon correctly via the proxy. Integrations with a *legacy* brands entry (added before the Feb-2026 cutoff) keep showing in HACS. This is a HACS-side gap, not a repo defect — nothing to fix in the integration; it resolves when HACS points its dashboard at the proxy (tracked in hacs/integration #5171 and #5223). Don't try to "fix" it by PR-ing `home-assistant/brands` (auto-closed).
+>
+> ⚠️ **Ship the `@2x` variants or the icon flickers/fails on HiDPI.** The most common "icon shows only sometimes" bug is a present `icon.png` with **no `icon@2x.png`**: a Retina/zoomed client requests `@2x`, 404s, and falls back inconsistently. `icon@2x.png` (512²) and `logo@2x.png` are not optional. Exact, square sizes matter — an off-spec `icon.png` (e.g. 384²) also misbehaves.
+>
+> **Sources:** a placeholder may start as an SVG rasterised with `cairosvg` (ImageMagick's MSVG renderer botches text) or `convert -background none -density 144 in.svg out.png`. But the asset can equally be a **crisp nearest-neighbour upscale of a real device render** — for a pixel display this is the strongest branding. Pick by where HA shows it: the **logo** renders large (integration page / HACS) so a busy/detailed screen reads well; the **icon** renders small (~48px in the integrations list) so use a **simple, low-detail** screen (fewer, fatter pixels survive the shrink) — a full text-heavy screen turns to mush. Generate the PNG straight from the byte-faithful preview (`render_layout_png(..., scale=N)`), not a photo.
 
 > HACS `check-brands` fails if `custom_components/{domain}/brand/icon.png` is absent and the integration is not listed in the HA brands repo.
 
@@ -106,6 +108,7 @@ The `description`, `issues`, and `topics` checks fail silently until the first `
 
 **GitHub workflows** — look for existing workflow files in the current project first and replicate the same patterns. If none exist, use standard HA integration CI:
 - `.github/workflows/semantic_release.yml` — triggers on `v*.*.*` tag push; uses `softprops/action-gh-release@v3` with `generate_release_notes: true`. Tags containing `beta` auto-marked as prerelease. No npm, no semantic-release tooling needed.
+- `.github/workflows/release.yml` — **Create Release ZIP.** Triggers on `release: published`; zips the contents of `custom_components/<domain>/` (files at the **zip root**, not nested) and attaches it as the `<filename>` asset declared in `hacs.json`. **Required whenever `hacs.json` sets `zip_release: true`** — HACS downloads that asset, so a missing zip = `Could not download` on install. Full canonical YAML in the templates appendix below. (The `release: published` trigger fires when a human publishes the drafted release; a release *created* by `GITHUB_TOKEN` would be suppressed by the anti-recursion rule, so publish from the draft, don't auto-create via token.)
 - `.github/workflows/create-dev-pr.yml` — triggers on every push to non-main branches; auto-creates a draft PR with **title from commits** (`feat:` wins over `fix:` wins over last commit). Updates PR body with commit list on subsequent pushes. **Full canonical YAML in the *create-dev-pr.yml template* appendix below** — this skill is the source of truth; do not copy from any other repo. ⚠️ After computing `TITLE`, always add `TITLE=$(echo "$TITLE" | xargs)` before `echo "title=$TITLE" >> $GITHUB_OUTPUT` — GitHub Actions env var interpolation can add surrounding whitespace that breaks `lint_pr.yml` semantic title validation. **Do NOT add a label step here** — labelling is the autolabeler's job (below). Since this sets the title to the winning commit type, autolabelling off the title is effectively commit-driven; a second labeler here just causes flapping.
 - `.github/workflows/release_drafter.yml` — owns the draft release notes (categories + `version-resolver` + `$BODY`); `push` (main) trigger only; `pull-requests: write`. Labelling lives in `pr-labeler.yml` (the sole labeler), so this carries no autolabeler job.
 - `.github/workflows/pr-labeler.yml` — runs `release-drafter/release-drafter/autolabeler@v7` on `pull_request` (opened/reopened/synchronize). The **sole labeler.**
@@ -114,6 +117,8 @@ The `description`, `issues`, and `topics` checks fail silently until the first `
 - `.github/workflows/hassfest_validate.yml`
 - `.github/workflows/python_validate.yml` — **pin the matrix to HA's current minimum Python** (as of 2026-06, `["3.14"]` — HA dev requires 3.14.2+; `pip install homeassistant` refuses older). Test the *floor* HA supports, and re-check it at developers.home-assistant.io/docs/development_environment when HA bumps. Keep this in lockstep with `pyproject.toml` ruff `target-version = "py314"` and pylint `py-version = "3.14"`, and `pyrightconfig.json`.
 - `.github/workflows/check-manifest-version.yml`
+- `.github/workflows/quality_audit.yml` — runs `scripts/skill_audit.sh` on every PR to mechanically enforce skill conformance (workflows present, action pins current, antipatterns absent). See **Mode 4 — Audit**.
+- `scripts/skill_audit.sh` — the mechanical conformance check (run locally before claiming done; CI runs it too).
 - `.github/pr-labeler.yml`
 - `.github/release-drafter.yml` — autolabeler rules are **title-only** (no `branch:` rules). The release-drafter autolabeler can only match title/body/branch/files (never commit subjects), so label off the **title** — which `create-dev-pr` already derives from the commits. Keep it the one-and-only labeler; don't also label in `create-dev-pr.yml`.
 - `.github/dependabot.yml` — see the **Dependabot** section below.
@@ -167,9 +172,17 @@ jobs:
           }
           desc() { printf '%s' "$1" | sed -E 's/^[a-zA-Z]+(\([^)]*\))?!?:[[:space:]]*//'; }
 
+          # The manifest/plugin version-bump commit is release plumbing, not a changelog
+          # entry. Skip it: as a lone 'chore' it would otherwise spawn a 🧰 Maintenance
+          # section and, by adding a second commit type, trip the >1-type sub-head guard.
+          is_version_bump() {
+            printf '%s' "$1" | grep -qiE '^[a-z]+(\([^)]*\))?:[[:space:]]*bump\b.*(\bversion\b|\bmanifest\b|\bto v?[0-9]+\.[0-9]+)'
+          }
+
           BREAKING=""; FEAT=""; FIX=""; MAINT=""; OTHER=""
           while IFS= read -r s; do
             [ -z "$s" ] && continue
+            is_version_bump "$s" && continue
             d=$(desc "$s")
             case "$(classify "$s")" in
               breaking) BREAKING="${BREAKING}  - ${d}"$'\n' ;;
@@ -239,7 +252,7 @@ jobs:
 
 #### Remaining workflow + config templates (canonical — copy these, no external repo)
 
-All paths assume one integration per repo: `custom_components/<domain>/manifest.json` is resolved with `ls custom_components/*/manifest.json | head -1`. Action majors are current as of 2026-06; Dependabot (`github-actions`) keeps them bumped. (`release.yml` is **not** a separate file — the release path is `release_drafter.yml` drafting notes on `main` + `semantic_release.yml` cutting the release on the tag.)
+All paths assume one integration per repo: `custom_components/<domain>/manifest.json` is resolved with `ls custom_components/*/manifest.json | head -1`. Action majors are current as of 2026-06; Dependabot (`github-actions`) keeps them bumped. The full release path is: `release_drafter.yml` drafts notes on `main`, `semantic_release.yml` cuts the release on the tag, and **`release.yml` (*Create Release ZIP*) attaches the `<domain>.zip` asset on publish** — the last is mandatory whenever `hacs.json` sets `zip_release: true` (omit it only on a repo that deliberately uses no `zip_release`).
 
 **`.github/workflows/lint_pr.yml`** — semantic PR-title gate.
 ```yaml
@@ -442,6 +455,35 @@ jobs:
           prerelease: ${{ steps.pre.outputs.prerelease }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+**`.github/workflows/release.yml`** — *Create Release ZIP*. Required when `hacs.json` has `zip_release: true`: builds `<domain>.zip` (integration files at the **zip root**) and attaches it to the published release, so HACS has the asset to download. `cd` into the package before zipping so paths are root-relative (not `custom_components/<domain>/…`). Uses the `gh` CLI to upload (the old `actions/upload-release-asset@v1` is archived — don't reinstate it).
+```yaml
+name: Create Release ZIP
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Create Release Asset
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create ZIP file
+        run: |
+          cd custom_components/<domain>
+          zip -r "$GITHUB_WORKSPACE/<domain>.zip" . -x '*/__pycache__/*' '*.pyc'
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "$GITHUB_WORKSPACE/<domain>.zip" --clobber
 ```
 
 **`.github/workflows/hassfest_validate.yml`** — HA manifest/services/quality-scale validation.
@@ -910,6 +952,7 @@ This creates `notify.{device_id}` (e.g. `notify.pimoroni_unicorn_studio`) with f
 - Read state from `self.coordinator.data` only — never do I/O in properties
 - Don't pass `update_before_add=True` to `async_add_entities`. It papers over a real gap and schedules a refresh **debouncer timer** that lingers in tests and frozen-clock runs. The gap: `CoordinatorEntity` does **not** push initial state on add, so a push-style entity (one that sets `_attr_native_value` inside `_handle_coordinator_update`) reads `unknown` until the next poll. Fix it properly — either compute `native_value` as a **property** off `self.coordinator.data` (always current), or call `self._handle_coordinator_update()` at the end of `async_added_to_hass` (after `await super().async_added_to_hass()`) to populate from the already-loaded coordinator data. `first_refresh` runs before entities are added, so the data is there.
 - **A list/collection sensor's state should be the `len()` count, with the items in an attribute** — not a timestamp or the raw list. (`last_updated`/`last_changed` are already built-in state attributes; don't re-add them.) Add `_attr_state_class = MEASUREMENT` so the count graphs.
+- **A `device_class` constrains which `state_class` is legal — verify the pair against the authoritative source, never guess.** HA hard-codes the allowed combinations in `DEVICE_CLASS_STATE_CLASSES` (`homeassistant/components/sensor/const.py`); a disallowed pair logs *"is using state class X which is impossible considering device class Y"* and silently drops long-term statistics. The trap that bit hard: `SensorDeviceClass.MONETARY` permits **only `{SensorStateClass.TOTAL}`** — `MEASUREMENT` is invalid for monetary. Don't "fix" an invalid combo by **deleting** `state_class` (that kills LTS entirely, a worse regression than the warning) — switch to a *valid* one. So a fluctuating money **balance** (settle-up debt, account balance) is `device_class=MONETARY` + `state_class=TOTAL`, not `MEASUREMENT`. Before setting any `device_class`/`state_class` pair, check the current mapping at https://raw.githubusercontent.com/home-assistant/core/dev/homeassistant/components/sensor/const.py (or the device-class table at developers.home-assistant.io/docs/core/entity/sensor) — the mapping changes between HA versions. Lock the chosen pair with an attribute test so a future rewrite can't silently drop it.
 
 **`EntityDescription` pattern** — preferred when an integration exposes many similar entities:
 ```python
@@ -1406,3 +1449,102 @@ Apply the same patterns and code style as Mode 1.
 3. Check `quality_scale.yaml` exists; if not, offer to create it
 4. Check `manifest.json` — correct `documentation` URL pointing to the repo, keys in order (`domain`, `name`, then alphabetical)
 5. Report: files changed · issues fixed · issues intentionally suppressed (with rationale) · remaining manual work
+
+---
+
+## Mode 4 — Audit (skill conformance)
+
+**Why this is separate from lint.** Mode 3 (lint) answers *is the code hygienic* — ruff/pyright/manifest order, tool-driven. Mode 4 answers *was this skill actually followed* — are the canonical workflows present and correct, the documented patterns applied, the antipatterns gone, `quality_scale.yaml` honest. The skill has repeatedly been *used* while specific items were missed (stale action pins, a deprecated notify path, an optimistic `exempt`, a hand-created PR). Lint can't catch those; the audit does. **Run it before claiming a tier and before merge — it's part of definition-of-done.**
+
+**Two layers, because a checklist you must remember to run gets skipped:**
+1. **Mechanical gate (`scripts/skill_audit.sh`, enforced by `quality_audit.yml` on every PR).** Greps the high-confidence, machine-checkable subset and fails CI on any violation. This is what *stops* regressions — it can't be forgotten.
+2. **Judgement checklist (below).** The items a grep can't decide — run these by reading the code.
+
+### Mechanical gate — `scripts/skill_audit.sh`
+
+```bash
+#!/usr/bin/env bash
+# Skill-conformance audit: verifies the ha-integration skill was actually followed —
+# canonical workflows present, action pins current, antipatterns absent, quality_scale
+# present. Mechanical subset of Mode 4. Exit 1 on any FAIL. Runs locally and in CI.
+set -uo pipefail
+
+CC=$(ls -d custom_components/*/ 2>/dev/null | head -1)
+fail=0
+FAIL() { echo "❌ FAIL: $*"; fail=1; }
+WARN() { echo "⚠️  WARN: $*"; }
+
+# --- Canonical workflows present ---
+for w in create-dev-pr pr-labeler release_drafter semantic_release lint_pr \
+         hacs_validate hassfest_validate python_validate check-manifest-version; do
+  [ -f ".github/workflows/$w.yml" ] || FAIL "missing .github/workflows/$w.yml"
+done
+[ -f .github/release-drafter.yml ] || FAIL "missing .github/release-drafter.yml"
+[ -f .github/dependabot.yml ]      || FAIL "missing .github/dependabot.yml"
+
+# --- Action pins current (stale majors Dependabot would immediately bump) ---
+grep -rnE 'actions/checkout@v[1-6]\b'                 .github/workflows/ && FAIL "stale actions/checkout (use v7)"
+grep -rnE 'actions/setup-python@v[1-5]\b'             .github/workflows/ && FAIL "stale actions/setup-python (use v6)"
+grep -rnE 'softprops/action-gh-release@v[12]\b'       .github/workflows/ && FAIL "stale action-gh-release (use v3)"
+grep -rnE 'amannn/action-semantic-pull-request@v[1-5]\b' .github/workflows/ && FAIL "stale semantic-pull-request (use v6)"
+
+# --- Workflow correctness ---
+grep -q "Remove superseded" .github/workflows/pr-labeler.yml 2>/dev/null \
+  || FAIL "pr-labeler.yml missing the removal-only superseded-label step"
+grep -q "dependabot\[bot\]" .github/workflows/check-manifest-version.yml 2>/dev/null \
+  || WARN "check-manifest-version may not exempt dependabot[bot]"
+grep -q "gh release list" .github/workflows/check-manifest-version.yml 2>/dev/null \
+  || WARN "check-manifest-version may not compare against the last published release"
+
+# --- Antipatterns in integration code (high-confidence) ---
+if [ -n "$CC" ]; then
+  ap() { grep -rnE "$1" "$CC" 2>/dev/null && FAIL "$2"; }
+  ap 'discovery\.async_load_platform' "deprecated discovery.async_load_platform (use NotifyEntity / platform forward)"
+  ap 'BaseNotificationService'         "deprecated BaseNotificationService (use NotifyEntity)"
+  ap 'update_before_add=True'          "update_before_add=True (populate via property or _handle_coordinator_update)"
+  ap 'OptionsFlowHandler'              "deprecated OptionsFlowHandler name (use OptionsFlow)"
+  ap 'PlatformNotReady'                "PlatformNotReady in a config-entry integration (use ConfigEntryNotReady)"
+  ap '_LOGGER\.[a-z]+\([[:space:]]*f"' "f-string in a logging call (use lazy % args — ruff G004)"
+  ti=$(grep -rn '# type: ignore' "$CC" 2>/dev/null | grep -v 'import-untyped')
+  [ -n "$ti" ] && { echo "$ti"; FAIL "bare # type: ignore (Platinum: only [import-untyped] with a reason)"; }
+  grep -rq 'from __future__ import annotations' "$CC"__init__.py 2>/dev/null \
+    || WARN "no 'from __future__ import annotations' in __init__.py"
+
+  # --- quality_scale + manifest honesty ---
+  [ -f "${CC}quality_scale.yaml" ] || FAIL "missing quality_scale.yaml"
+  M="${CC}manifest.json"
+  grep -q '"integration_type"' "$M" 2>/dev/null || FAIL "manifest.json missing integration_type"
+  grep -q '"issue_tracker"'    "$M" 2>/dev/null || FAIL "manifest.json missing issue_tracker (HACS requires it)"
+fi
+
+[ "$fail" = 0 ] && { echo "✅ skill audit passed"; exit 0; } || { echo "skill audit FAILED"; exit 1; }
+```
+
+`.github/workflows/quality_audit.yml`:
+```yaml
+name: Skill Audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash scripts/skill_audit.sh
+```
+
+Add `"scripts/*" = ["T20", "INP001"]` to ruff `per-file-ignores` if any audit helper is Python (the bash script needs no ignore). When the skill adds a new antipattern or canonical workflow, **add the matching check here** — the gate is only as current as its rules.
+
+### Judgement checklist (read the code — a grep can't decide these)
+
+- **Workflows behave, not just exist:** `create-dev-pr` trims the title with `xargs`, has `concurrency` + 0-ahead skip, and no label step; `release_drafter` is push-only with no second autolabeler; `check-manifest-version` compares to the **last published release** and exempts `dependabot[bot]` on the *failing steps*.
+- **Patterns applied:** `runtime_data` (not `hass.data[DOMAIN][entry_id]`) for entry state; coordinator `async_shutdown()` on unload; `async_remove_config_entry_device` present if the integration creates a device; `DeviceInfo` TypedDict; `_attr_has_entity_name = True`; typed `ConfigEntry` alias; modern `NotifyEntity` (or a directly-registered service for custom `data`).
+- **`quality_scale.yaml` honest:** every canonical rule listed; every `exempt` carries a real `comment`; no optimistic `exempt` masking a gap (e.g. `stale-devices` exempt while a device *is* created); the `manifest.json` tier claimed only when every rule at/below it is `done`/`exempt`.
+- **Tests mock the boundary:** a real setup-entry `LOADED` test exists (not just `async_setup_component`); the transport is mocked, not the integration's own functions; a two-entry parallel `LOADED` test exists if multiple devices are allowed; parsers have unit tests.
+- **Commit/PR discipline:** subjects are single tight imperatives; the PR was opened by `create-dev-pr`, not hand-created; the version bumped once vs the last release per the type label.
+
+**Report:** per-item pass/fail with `file:line` evidence · what the mechanical gate caught · remaining manual work. Fix findings before claiming the tier.

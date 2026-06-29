@@ -42,9 +42,17 @@ jobs:
           }
           desc() { printf '%s' "$1" | sed -E 's/^[a-zA-Z]+(\([^)]*\))?!?:[[:space:]]*//'; }
 
+          # The manifest/plugin version-bump commit is release plumbing, not a changelog
+          # entry. Skip it: as a lone 'chore' it would otherwise spawn a 🧰 Maintenance
+          # section and, by adding a second commit type, trip the >1-type sub-head guard.
+          is_version_bump() {
+            printf '%s' "$1" | grep -qiE '^[a-z]+(\([^)]*\))?:[[:space:]]*bump\b.*(\bversion\b|\bmanifest\b|\bto v?[0-9]+\.[0-9]+)'
+          }
+
           BREAKING=""; FEAT=""; FIX=""; MAINT=""; OTHER=""
           while IFS= read -r s; do
             [ -z "$s" ] && continue
+            is_version_bump "$s" && continue
             d=$(desc "$s")
             case "$(classify "$s")" in
               breaking) BREAKING="${BREAKING}  - ${d}"$'\n' ;;
@@ -55,12 +63,23 @@ jobs:
             esac
           done <<< "$SUBJECTS"
 
+          # Emit the emoji sub-heads ONLY when the PR spans >1 commit type. release-drafter
+          # already files the PR under one category heading (🚀/🔧/🧰…), so for a single-type
+          # PR (every Dependabot chore, most human PRs) a matching sub-head just duplicates it.
+          groups=0
+          for g in "$BREAKING" "$FEAT" "$FIX" "$MAINT" "$OTHER"; do
+            [ -n "$g" ] && groups=$((groups + 1))
+          done
           BODY=""
-          [ -n "$BREAKING" ] && BODY="${BODY}  **🚨 Breaking**"$'\n'"${BREAKING}"
-          [ -n "$FEAT" ]     && BODY="${BODY}  **🚀 Features**"$'\n'"${FEAT}"
-          [ -n "$FIX" ]      && BODY="${BODY}  **🔧 Fixes**"$'\n'"${FIX}"
-          [ -n "$MAINT" ]    && BODY="${BODY}  **🧰 Maintenance**"$'\n'"${MAINT}"
-          [ -n "$OTHER" ]    && BODY="${BODY}  **📦 Other**"$'\n'"${OTHER}"
+          if [ "$groups" -le 1 ]; then
+            BODY="${BREAKING}${FEAT}${FIX}${MAINT}${OTHER}"
+          else
+            [ -n "$BREAKING" ] && BODY="${BODY}  **🚨 Breaking**"$'\n'"${BREAKING}"
+            [ -n "$FEAT" ]     && BODY="${BODY}  **🚀 Features**"$'\n'"${FEAT}"
+            [ -n "$FIX" ]      && BODY="${BODY}  **🔧 Fixes**"$'\n'"${FIX}"
+            [ -n "$MAINT" ]    && BODY="${BODY}  **🧰 Maintenance**"$'\n'"${MAINT}"
+            [ -n "$OTHER" ]    && BODY="${BODY}  **📦 Other**"$'\n'"${OTHER}"
+          fi
           [ -z "$BODY" ] && BODY="  - (no commits ahead of main)"
           echo "body<<EOF" >> $GITHUB_OUTPUT
           printf '%s' "$BODY" >> $GITHUB_OUTPUT
