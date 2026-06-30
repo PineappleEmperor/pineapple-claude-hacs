@@ -1,6 +1,6 @@
 ---
 name: ha-integration
-description: Use when creating, modifying, linting, or auditing a Home Assistant custom integration — custom_components packages, manifest.json, config/options/reauth/reconfigure flows, coordinator/entity platforms, services, diagnostics, quality_scale — or when reading/triaging a Home Assistant log. Use before writing or modifying any HA integration code; re-invoke after /compact.
+description: Use when developing or troubleshooting a Home Assistant custom integration — Python code under `custom_components/`. Covers building, fixing, or reviewing the integration's backend: config/options/reauth/reconfigure flows, the data coordinator and entity platforms (sensor, switch, notify, fan, etc.), manifest, services, diagnostics, and quality_scale. Reach for it on symptom-style reports too: an entity going unavailable after restart, a notify/custom service breaking after an HA update, a `device_class`/`state_class` mismatch HA complains about, a reconfigure flow request, or CI/Dependabot/HACS/hassfest issues on an integration repo. Also use to read or triage a `home-assistant.log` — finding the real fault among thousands of noisy lines. NOT for Lovelace cards, dashboard/panel UI styling, template sensors in YAML, or generic non-HA Python. Invoke before editing integration code; re-invoke after /compact.
 ---
 
 # Home Assistant Integration Assistant
