@@ -8,7 +8,7 @@
       "name": "ha",
       "source": "./plugins/ha",
       "description": "Home Assistant integration + custom panel skills (ha-integration, ha-panel-design).",
-      "version": "1.2.0"
+      "version": "2.0.0"
     }
   ]
 }
