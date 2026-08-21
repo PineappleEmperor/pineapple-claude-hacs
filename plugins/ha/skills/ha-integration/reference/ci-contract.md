@@ -105,24 +105,3 @@ the audit's static guards.
 
 **Built but unproven** — no rc has been cut: `cut_rc.yml`, `auto_draft_pr.yml`, the
 `RELEASE_TOKEN` failure paths.
-
-## Gaps
-
-- [ ] Run the testbed through a full dev cycle: branch → draft PR → merge → rc → final
-- [ ] Maintain an rc draft alongside the full draft; publishing an rc consumes only it
-- [ ] Remove lingering drafts of a version when its final publishes
-- [ ] Version gate becomes advisory in integrations: suggest the expected next version
-      and rc, allow override, never block
-- [ ] Patch the committed `manifest.json` to the resolved version, so the repo is not stale
-- [ ] Consistent job naming, with `ruleset.json` updated in the same PR
-- [ ] Port `skill_audit.sh` to Python with per-check unit tests; make "new CI scripts are
-      Python" a rule in the skill
-- [ ] Reusable workflows so fixes propagate by Dependabot bump rather than re-copying
-- [ ] `bootstrap_repo.sh`: secret, ruleset, description, topics, licence, hooks path
-- [ ] uv with an HA-version-keyed cache in `python_validate`
-- [ ] One source of truth for the HA version; the other five derived and checked
-- [ ] SHA-pinned actions
-- [ ] `dependency-review` on PRs
-- [ ] Nudge-only `stale`
-- [ ] Skill prose outside `reference/` still describing the old model — Mode 1 scaffolding,
-      quality-scale advice, the Freshness table's consumers
