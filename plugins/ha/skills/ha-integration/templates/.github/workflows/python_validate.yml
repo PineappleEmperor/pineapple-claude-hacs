@@ -42,7 +42,14 @@ jobs:
           [ -f requirements.test.txt ] && uv pip install --system -r requirements.test.txt || true
 
       - name: Ruff
-        run: ruff check custom_components/
+        # The whole repo under the shipped pyproject.toml, which is Home Assistant
+        # core's own rule set: integration code, the copied scripts/ and tests/, and
+        # conftest.py alike. Linting custom_components/ alone let the shipped copies
+        # rot unseen. The format check keeps the tree as ruff format leaves it, so
+        # no copied file ever needs a formatter exclusion.
+        run: |
+          ruff check .
+          ruff format --check .
 
       - name: Pyright
         run: python -m pyright custom_components/

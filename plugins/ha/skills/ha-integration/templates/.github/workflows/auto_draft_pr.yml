@@ -30,6 +30,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # The shipped scripts are written to the Python floor the whole stack declares
+      # (pyproject.toml, pyrightconfig.json, python_validate.yml). The runner's own
+      # python3 is older and rejected their syntax; version_sync.py holds every
+      # workflow's python-version to that floor.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
       - name: Open a draft PR if none exists
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
@@ -38,7 +46,7 @@ jobs:
           BASE: ${{ github.event.repository.default_branch }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::notice::RELEASE_TOKEN is not set; skipping the draft PR"
+            echo "::warning::RELEASE_TOKEN is not set; no draft PR was opened"
             exit 0
           fi
           EXISTING=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')

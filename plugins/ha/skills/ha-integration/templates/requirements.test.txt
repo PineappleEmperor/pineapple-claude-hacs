@@ -5,12 +5,13 @@
 # hard-pins `homeassistant==<that release>`, so the pin below decides which HA
 # version the suite runs against. A mismatched pin fails at import, not at test
 # time. Pick the release matching the HA you target, and keep its Python floor
-# in lockstep with the `python-version` matrix in python_validate.yml,
-# `target-version` in pyproject.toml, and pyrightconfig.json.
+# in lockstep with `python-version` in python_validate.yml (a single value —
+# a matrix renames the required check-run), `target-version` in pyproject.toml,
+# and pyrightconfig.json. scripts/version_sync.py compares those three.
 #
 # Version map (verify at pypi.org/project/pytest-homeassistant-custom-component):
-#   0.13.354 -> homeassistant 2026.8.0, requires-python >=3.14
-pytest-homeassistant-custom-component==0.13.354
+#   0.13.357 -> homeassistant 2026.8.3, requires-python >=3.14
+pytest-homeassistant-custom-component==0.13.357
 
 
 # Add integration-specific test deps below (e.g. a fake transport, respx,
@@ -31,9 +32,8 @@ pytest-homeassistant-custom-component==0.13.354
 # surface as `'MockConfigEntry' object has no attribute 'runtime_data'`, which
 # points at the integration rather than at a missing dependency.
 #
-# Pin it from core's own manifest for the HA version above, NOT from PyPI latest:
+# Pin it from core's own manifest for the HA version pinned above, NOT from PyPI latest —
+# PyPI is routinely ahead, and a mismatch reintroduces the same import failure:
 #   curl -s https://raw.githubusercontent.com/home-assistant/core/<ha-version>/homeassistant/components/frontend/manifest.json
-# For HA 2026.8.0 that is 20260729.5 (PyPI latest was already 20260729.6 — a
-# mismatch here reintroduces the same import failure). Move it whenever the
-# pytest-homeassistant-custom-component pin moves.
-# home-assistant-frontend==20260729.5   # uncomment for panel integrations
+# Re-derive it whenever the pytest-homeassistant-custom-component pin moves.
+# home-assistant-frontend==<version from that manifest>   # uncomment for panel integrations

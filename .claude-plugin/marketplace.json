@@ -1,5 +1,5 @@
 {
-  "name": "pineapple-claude-hacs",
+  "name": "ha-skills",
   "owner": {
     "name": "PineappleEmperor"
   },
@@ -7,8 +7,7 @@
     {
       "name": "ha",
       "source": "./plugins/ha",
-      "description": "Home Assistant integration + custom panel skills (ha-integration, ha-panel-design).",
-      "version": "7.3.0rc2"
+      "description": "Home Assistant skills: integration development (ha-integration), custom panel design (ha-panel-design), problem triage (ha-triage)."
     }
   ]
 }

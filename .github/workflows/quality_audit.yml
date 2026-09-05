@@ -16,7 +16,31 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: python3 scripts/skill_audit.py
+      # The shipped scripts are written to the Python floor the whole stack declares
+      # (pyproject.toml, pyrightconfig.json, python_validate.yml). The runner's own
+      # python3 is older and rejected their syntax; version_sync.py holds every
+      # workflow's python-version to that floor.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      # PyYAML because skill_audit.py parses workflows; the system python had it, this
+      # interpreter does not.
+      - run: pip install --quiet pyyaml
+      # GH_TOKEN as step env, not a persisted checkout credential: three checks query
+      # GitHub (required contexts, the live ruleset, the dependency graph) and without a
+      # token they report NOT CHECKED, so they only ever ran on a maintainer's machine —
+      # a required context with no producing job blocked a PR here while CI stayed green.
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/skill_audit.py
       # The Python version is written in several files, each read by a different
       # tool. This is the only thing that compares them.
       - run: python3 scripts/version_sync.py
+      # Authoring checks for the skills in this repository — frontmatter, router links,
+      # docs that match the templates, and every Python example in the docs linted under
+      # the shipped ruff rules, which is why ruff is installed here. A scaffolded repo has
+      # no `plugins/*/skills/`, so the script is not shipped and this step no-ops there.
+      - if: hashFiles('scripts/skill_meta_audit.py') != ''
+        run: |
+          pip install --quiet ruff
+          python3 scripts/skill_meta_audit.py

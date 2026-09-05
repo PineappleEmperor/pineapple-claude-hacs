@@ -3,9 +3,9 @@
 Lives at the repo root, not in tests/ — see the import note below.
 """
 
-from collections.abc import Generator
+import pytest
 
-# MUST stay the first import, and this file MUST be at the repo root.
+# This import MUST stay, and this file MUST be at the repo root.
 # pytest-homeassistant-custom-component bundles its own `custom_components`
 # package under testing_config/ and binds the bare name `custom_components` to
 # it while its plugin loads. Home Assistant discovers custom integrations with a
@@ -17,12 +17,8 @@ from collections.abc import Generator
 # Being at the root also puts the repo on sys.path, so no `pythonpath` setting
 # is needed and `pytest` works from any directory.
 import custom_components  # noqa: F401
-import pytest
 
 
 @pytest.fixture(autouse=True)
-def auto_enable_custom_integrations(
-    enable_custom_integrations: None,
-) -> Generator[None]:
+def auto_enable_custom_integrations(enable_custom_integrations: None) -> None:
     """Let Home Assistant load integrations from custom_components/ in every test."""
-    yield

@@ -16,6 +16,12 @@ jobs:
         with:
           persist-credentials: false
 
+      # Every step that runs Python runs it on the floor the stack declares, never on the
+      # runner's own interpreter; skill_audit.py fails a job that does otherwise.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
       # The tag is the version. HACS installs the asset built here, so the manifest
       # inside this zip is what users actually get, and patching it means no PR has
       # to carry a hand-written bump. frenck/spook patches the same way, from the
@@ -42,10 +48,53 @@ jobs:
           print(f"{manifest}: version={version}")
           PY
 
-      - name: Create ZIP file
+      # The panel bundle is rebuilt HERE, immediately before packing, rather than in its
+      # own workflow. Two workflows on the same `release: published` event cannot be
+      # ordered, so a separate rebuild could finish after the zip was already packed and
+      # ship the stale bundle it was meant to prevent. A repo with no frontend/ skips it.
+      - name: Is there a panel to build
+        id: panel
         run: |
-          cd custom_components/<domain>
-          zip -r "$GITHUB_WORKSPACE/<domain>.zip" . -x '*/__pycache__/*' '*.pyc'
+          if [ -f frontend/package.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no frontend/ — nothing to rebuild"
+          fi
+
+      - if: steps.panel.outputs.present == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Rebuild the panel bundle if it is stale
+        if: steps.panel.outputs.present == 'true'
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      # Reported, not enforced: the zip now carries a fresh build either way, so a stale
+      # committed bundle is a repo-hygiene problem rather than a release defect.
+      - name: Say whether the committed bundle was stale
+        if: steps.panel.outputs.present == 'true'
+        run: |
+          if git diff --quiet -- 'custom_components/*/panel/*.js'; then
+            echo "::notice::committed panel bundle was already current"
+          else
+            echo "::warning::the committed panel bundle was stale; this release ships a fresh build. Run 'npm run build' in frontend/ and commit it."
+          fi
+
+      # The domain is derived the same way the manifest step derives it — one
+      # integration per repo, found by its manifest — never hand-edited into this file.
+      # A `<domain>` placeholder left in a run: block is a bash redirect, and the step
+      # died on exactly that in a published release, so no asset was attached.
+      - name: Create ZIP file
+        id: zip
+        run: |
+          DOMAIN=$(basename "$(dirname custom_components/*/manifest.json)")
+          ASSET="$GITHUB_WORKSPACE/$DOMAIN.zip"
+          (cd "custom_components/$DOMAIN" && zip -r "$ASSET" . -x '*/__pycache__/*' '*.pyc')
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
 
       # No `${{ }}` inside a run block: the expression is substituted as text before
       # the shell sees it, so a crafted tag would execute here. Pass it as env.
@@ -53,4 +102,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" "$GITHUB_WORKSPACE/<domain>.zip" --clobber
+          ASSET: ${{ steps.zip.outputs.asset }}
+        run: gh release upload "$RELEASE_TAG" "$ASSET" --clobber

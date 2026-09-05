@@ -1,56 +1,68 @@
 #!/usr/bin/env python3
 """Group a PR's commit subjects by Conventional Commit type.
 
-Used by the `commit-summary` job in .github/workflows/pr-checks.yml to build the
-marked block in a PR body, and by the `title-check` job to suggest a title type.
-
-Lives in a script, not inline in the workflow, so it can be unit-tested — an
-inline heredoc cannot be, and a silently-wrong classifier corrupts release notes
-without ever failing a build.
+Also the one home of the release vocabulary the other scripts derive from.
 """
 
-from __future__ import annotations
-
 import argparse
+import pathlib
 import re
 import sys
 
-TYPE = re.compile(r"^(?P<type>[a-zA-Z]+)(\((?P<scope>[^)]*)\))?(?P<bang>!)?:\s*(?P<desc>.*)$")
+TYPE = re.compile(
+    r"^(?P<type>[a-zA-Z]+)(\((?P<scope>[^)]*)\))?(?P<bang>!)?:\s*(?P<desc>.*)$"
+)
 
 # Types the release-drafter autolabeler folds into `chore` -> 🧰 Maintenance.
 MAINT = frozenset({"chore", "docs", "refactor", "perf", "test", "build", "ci", "style"})
 
-# The manifest/plugin version bump is release plumbing, not a changelog entry.
-# Anchored on the SHAPE ("bump … version"), not on "any bump mentioning something
-# version-shaped": an earlier pattern ended in `to v?\d+\.\d+`, which silently ate
-# `chore: bump actions/checkout from 6.0.0 to 7.0.1` — i.e. every semver dependency
-# bump vanished from the notes.
-# Release plumbing, not a changelog entry. The noun list stays closed on purpose:
-# allowing arbitrary words before "to <semver>" would swallow every Dependabot
-# bump ("bump aiohttp to 3.10.1"), which is a real change and must reach the notes.
+# The manifest/plugin version bump is release plumbing, not a changelog entry. The noun
+# list stays closed on purpose: allowing arbitrary words before "to <semver>" would
+# swallow every Dependabot bump, which is a real change and must reach the notes.
 BUMP = re.compile(
     r"^[a-z]+(\([^)]*\))?:\s*bump\s+(the\s+)?"
     r"((manifest|plugin|integration|skill|marketplace|ha)\s+)*"
     r"(version\b|to\s+v?\d+\.\d+)",
-    re.I,
+    re.IGNORECASE,
 )
 
+# The release vocabulary: groups in severity order, the heading each takes in the
+# notes, the label a PR of that group carries, and the semver tier that label resolves.
 ORDER = ("breaking", "feat", "fix", "maint", "other")
-
-# No group labels. release-drafter already files each PR under one category
-# heading, so a label inside the entry repeats it four lines later and, when a PR
-# spans types, files fixes under Features. Measured across one session: 3 of 8
-# merged PRs spanned more than one type, so this was not the rare case it was
-# documented as. The commits keep their severity order; the category above names
-# the PR, and the bullets say what it contained.
+HEADINGS = {
+    "breaking": "🚨 Breaking Changes",
+    "feat": "🚀 Features",
+    "fix": "🔧 Fixes",
+    "maint": "🧰 Maintenance",
+    "other": "📦 Other",
+}
+LABEL_FOR = {
+    "breaking": "xfeat",
+    "feat": "feature",
+    "fix": "fix",
+    "maint": "chore",
+    "other": "chore",
+}
+BUMP_FOR = {
+    "breaking": "major",
+    "feat": "minor",
+    "fix": "patch",
+    "maint": "patch",
+    "other": "patch",
+}
+EMPTY_RANGE = "_No user-facing changes._"
 
 # Suggested PR title type per winning commit group: (title, category, semver bump).
 SUGGESTIONS = {
-    "breaking": ("`feat!:` (or any `type!:`)", "🚨 Breaking Change", "major"),
-    "feat": ("`feat:`", "🚀 Features", "minor"),
-    "fix": ("`fix:`", "🔧 Fixes", "patch"),
-    "maint": ("`chore:`", "🧰 Maintenance", "patch"),
-    "other": ("`chore:`", "🧰 Maintenance", "patch"),
+    "breaking": (
+        "`feat!:` (or any `type!:`)",
+        HEADINGS["breaking"],
+        BUMP_FOR["breaking"],
+    ),
+    "feat": ("`feat:`", HEADINGS["feat"], BUMP_FOR["feat"]),
+    "fix": ("`fix:`", HEADINGS["fix"], BUMP_FOR["fix"]),
+    "maint": ("`chore:`", HEADINGS["maint"], BUMP_FOR["maint"]),
+    "other": ("`chore:`", HEADINGS["maint"], BUMP_FOR["other"]),
 }
 
 
@@ -104,10 +116,18 @@ def winning(subjects: list[str]) -> str:
     return "maint"
 
 
-# Types the autolabeler maps to a release category. Anything else — `refactor:`,
-# `perf:`, `ci:` — is a valid Conventional Commit that carries no label, so a PR
-# titled with one gets no category and no version increment. Those become `chore:`.
-LABELLABLE = frozenset({"feat", "fix", "chore", "docs"})
+# The types a PR title may carry: the two that label on their own and the eight that
+# fold into `chore`. Any other commit type (`revert:`) is retyped `chore:` in a title.
+LABELLABLE = frozenset({"feat", "fix"}) | MAINT
+
+# The title-derived label is compared against the one the COMMITS entitle the PR to,
+# which is what makes it correct rather than present.
+MANAGED_LABELS = frozenset(LABEL_FOR.values())
+
+
+def label_for(subjects: list[str]) -> str:
+    """The one managed label these commits entitle the PR to."""
+    return LABEL_FOR[winning(subjects)]
 
 
 def title_for(subjects: list[str]) -> str:
@@ -138,17 +158,24 @@ def title_for(subjects: list[str]) -> str:
 
 
 def main() -> int:
+    """Print the title, label or winning group for the subjects on stdin or in a file."""
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--mode", choices=("winning", "title"), default="title")
-    ap.add_argument("--subjects", default="-", help="file of commit subjects, or - for stdin")
+    ap.add_argument("--mode", choices=("winning", "title", "label"), default="title")
+    ap.add_argument(
+        "--subjects", default="-", help="file of commit subjects, or - for stdin"
+    )
     args = ap.parse_args()
 
-    src = sys.stdin if args.subjects == "-" else open(args.subjects, encoding="utf-8")
-    with src as fh:
-        subjects = fh.read().splitlines()
+    if args.subjects == "-":
+        subjects = sys.stdin.read().splitlines()
+    else:
+        with pathlib.Path(args.subjects).open(encoding="utf-8") as fh:
+            subjects = fh.read().splitlines()
 
     if args.mode == "title":
         print(title_for(subjects))
+    elif args.mode == "label":
+        print(label_for(subjects))
     else:
         print(winning(subjects))
     return 0

@@ -11,3 +11,9 @@ __pycache__/
 !/.githooks/
 !/.claude-plugin/
 !/.gitignore
+# The project hook layer describes conventions specific to this repo, so it travels
+# with it. Everything else under .claude/ is per-machine state, including the
+# settings.local.json personal layer.
+!/.claude/
+/.claude/*
+!/.claude/settings.json

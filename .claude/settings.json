@@ -1,0 +1,81 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(//home/juicebox/claude-skills/scripts/**)",
+      "Write(//home/juicebox/claude-skills/scripts/**)",
+      "Edit(//home/juicebox/claude-skills/tests/**)",
+      "Write(//home/juicebox/claude-skills/tests/**)",
+      "Edit(//home/juicebox/claude-skills/.github/workflows/**)",
+      "Write(//home/juicebox/claude-skills/.github/workflows/**)",
+      "Edit(//home/juicebox/claude-skills/plugins/ha/skills/ha-integration/templates/**)",
+      "Write(//home/juicebox/claude-skills/plugins/ha/skills/ha-integration/templates/**)",
+      "Edit(//home/juicebox/claude-skills/plugins/ha/skills/ha-integration/reference/**)",
+      "Write(//home/juicebox/claude-skills/plugins/ha/skills/ha-integration/reference/**)",
+      "Edit(//home/juicebox/claude-skills/docs/backlog.md)",
+      "Write(//home/juicebox/claude-skills/docs/backlog.md)",
+      "Edit(//home/juicebox/claude-skills/docs/workflow-map.md)",
+      "Write(//home/juicebox/claude-skills/docs/workflow-map.md)"
+    ]
+  },
+  "sandbox": {
+    "filesystem": {
+      "denyWrite": [
+        "/home/juicebox/claude-skills/scripts",
+        "/home/juicebox/claude-skills/tests",
+        "/home/juicebox/claude-skills/.github/workflows",
+        "/home/juicebox/claude-skills/plugins/ha/skills/ha-integration/templates",
+        "/home/juicebox/claude-skills/plugins/ha/skills/ha-integration/reference",
+        "/home/juicebox/claude-skills/docs/backlog.md",
+        "/home/juicebox/claude-skills/docs/workflow-map.md"
+      ]
+    }
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if [ -f .claude-plugin/marketplace.json ]; then echo \"[marketplace-repo] This is the skills marketplace, not an integration: no version is declared in plugin.json or marketplace.json (Claude Code resolves it from the commit SHA), so nothing is ever bumped. templates/ is what ships to scaffolded repos — skill_audit.py and its tests belong there; skill_meta_audit.py is repo-local and must not be shipped. Anything naming a workflow or file that only exists here stays out of plugins/.\"; fi'"
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'echo \"[governed-edits] scripts/ tests/ .github/workflows/ templates/ docs/backlog.md docs/workflow-map.md and the skill reference/ dir are READ-ONLY to Bash AND to Edit/Write. A Read-only file system error or a permission denial there is the GATE working, not a fault to debug — do not try to route around it. Write them only through the governance MCP server, in this order: get_docs(tier) returns a ReceiptKey; get_file(path, ReceiptKey) returns the WHOLE file plus an EditKey, or get_function(path, name, ReceiptKey) returns one function with everything it uses plus an EditKey that unlocks only that text; patch_file(path, old_string, new_string, EditKey) makes one exact replacement, reports the diff, and ends with the EditKey for the next patch, so one read serves many patches; patch_twins does the same to a script or test AND its shipped copy under templates/, which must already be byte-identical. Keys rotate, are bound to content, and carry the gate process id as their second-last segment; a refusal names the cause (a key from a different gate id means the server restarted and every earlier key is dead), and the fix is always re-read rather than resend. Creating a new governed file: empty old_string. Mutation-testing a governed script needs a throwaway copy, since it cannot be broken in place.\"'"
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'echo \"[review-before-push] Before handing over any push, run a context-free reviewer subagent over the diff since the last pushed commit with a fixed brief: the backlog rows as the claims to verify, the twins/YAML-equality/subject/attribution invariants, discrepancies only with file:line. Self-review found none of the seven the reviewer found on 2026-09-04. Its findings become backlog rows before they become fixes. Prose has one source: state a fact once and point to it elsewhere; a restatement found is deleted, not synced.\"'"
+          },
+          {
+            "type": "command",
+            "command": "bash -c 'echo \"[read-the-file] READ THE FILES YOU ARE WORKING ON, IN FULL, BEFORE SAYING ANYTHING ABOUT THEM. Not a slice, not a chunk, not the first 120 lines — the whole file. A search LOCATES; it does not VERIFY, and an empty result is not evidence a thing is fixed; that mistake shipped a defect as resolved here twice. Shell grep/rg/ag/ack is BLOCKED, and a python or awk line-scanner over source is the same thing wearing a hat — also banned. To find candidate files use the governance gate's locate (regex, paths only) or find_files (glob); then read each candidate in full. Filtering structured DATA with jq is fine; scanning SOURCE is not. If you catch yourself sampling a file to confirm a hunch, stop and open it.\"'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'echo \"[read-dont-search] A search LOCATES; it does not VERIFY. It cannot tell you a thing is correct, and no matches is not evidence that it is fixed — that mistake shipped a defect as resolved in this repo. Use this only to find candidate files, as you would the gate's locate and find_files, then READ each one in full before concluding anything. If you are judging content, open the file instead.\"'"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/juicebox/claude-skills/scripts/no_shell_search.py"
+          },
+          {
+            "type": "command",
+            "command": "python3 /home/juicebox/claude-skills/scripts/no_git_stash.py"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -15,8 +15,8 @@ name: PR Checks
 # updated, which is the whole point of these jobs.
 # SAFETY: that trigger runs in the base repo's context with a writable token, so
 # nothing here may execute PR-authored code. The autolabeler checks out nothing;
-# the version gate explicitly checks out the BASE and reads the PR's manifest as
-# data over the API; the body/comment jobs never check out at all.
+# title-check checks out the BASE and reads the PR's commits as data over the API,
+# never the PR head.
 on:
   pull_request_target:
     # NOT `labeled`/`unlabeled`. The autolabeler runs inside this workflow with the
@@ -51,6 +51,9 @@ jobs:
       # (fix -> feat), the old label lingers and the PR lists under two
       # release-drafter categories. Remove superseded labels, keyed on the
       # same title the autolabeler reads (removal-only -> cannot flap).
+      # The type lists below are the autolabeler's, from .github/release-drafter.yml,
+      # and must stay in step with it: this once mapped only chore|docs, so a PR
+      # retitled feat -> refactor gained `chore` and kept `feature`.
       - name: Remove superseded type labels
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -59,7 +62,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           if   printf '%s' "$TITLE" | grep -qiE '^[a-z]+(\([^)]*\))?!:';        then WIN=xfeat
-          elif printf '%s' "$TITLE" | grep -qiE '^(chore|docs)(\([^)]*\))?:';   then WIN=chore
+          elif printf '%s' "$TITLE" | grep -qiE '^(chore|docs|refactor|perf|test|build|ci|style)(\([^)]*\))?:'; then WIN=chore
           elif printf '%s' "$TITLE" | grep -qiE '^fix(\([^)]*\))?:';            then WIN=fix
           elif printf '%s' "$TITLE" | grep -qiE '^(feat|feature)(\([^)]*\))?:'; then WIN=feature
           else exit 0  # title maps to no managed label; leave labels untouched
@@ -75,8 +78,11 @@ jobs:
           done
 
   # ----------------------------------------------------------- title-check ----
-  # Reads labels, so it must follow `label`. No polling: `needs` guarantees the
-  # autolabeler has finished, which is what the old standalone workflow could not.
+  # THE gate. `lint_pr` (title shape) and `label` (apply the label) are automation that
+  # informs; this is the one job whose failure must stop a merge, because it is the only
+  # one that asks whether the label is CORRECT rather than merely present. Reads labels,
+  # so it must follow `label`; `needs` guarantees the autolabeler has finished, which is
+  # what the old standalone workflow could not.
   title-check:
     name: CC label validation
     needs: label
@@ -84,69 +90,81 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # checkout first: it clears the workspace, so it cannot run after a step
-      # that wrote a file there. (skill_audit.sh enforces this.)
+      # that wrote a file there. (skill_audit.py enforces this.)
+      # base.ref, not base.sha: the sha is frozen at PR creation while this workflow
+      # runs from the base branch head, so a scripts/ change merged mid-PR ran the new
+      # workflow against the old script. Both are base-side; neither is PR-authored code.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.event.pull_request.base.ref }}
           persist-credentials: false
 
-      - name: Check for a version-resolvable label
+      # The shipped scripts are written to the Python floor the whole stack declares
+      # (pyproject.toml, pyrightconfig.json, python_validate.yml). The runner's own
+      # python3 is older and rejected their syntax; version_sync.py holds every
+      # workflow's python-version to that floor.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: The label must match what the commits entitle the PR to
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
         run: |
-          # Ground truth is the PR's ACTUAL labels, never a copy of the autolabeler's
-          # regexes — a duplicate would drift from .github/release-drafter.yml, and a
-          # checker that disagrees with the thing it checks is worse than none.
-          # Keep in sync with version-resolver in .github/release-drafter.yml.
-          KNOWN="xfeat xfeature major feat feature minor fix bugfix bug patch chore"
-          gh pr view "$PR" --json labels --jq '.labels[].name' > labels.txt || true
-          FOUND=""
-          for l in $KNOWN; do
-            grep -qx "$l" labels.txt && { FOUND="$l"; break; }
-          done
-          if [ -n "$FOUND" ]; then
-            echo "ok=true" >> $GITHUB_OUTPUT
-            echo "PR carries '$FOUND' - title is resolvable."
+          # A label being PRESENT is not a label being CORRECT. The autolabeler derives it
+          # from the TITLE, so a `fix:`-titled PR carrying a `feat!:` commit is labelled
+          # `fix`, files under Fixes, and resolves a patch bump for a change that breaks
+          # users. This compares the label the PR carries against the one its COMMITS
+          # entitle it to; the mapping lives in commit_summary.py, where it is unit-tested.
+          gh api --paginate "repos/$GH_REPO/pulls/$PR/commits" \
+            --jq '.[].commit.message | split("\n")[0]' > subjects.txt
+          EXPECTED=$(python3 scripts/commit_summary.py --mode label --subjects subjects.txt)
+          ACTUAL=$(gh pr view "$PR" --json labels \
+            --jq '[.labels[].name | select(test("^(xfeat|feature|fix|chore)$"))] | unique | join(" ")' || true)
+          echo "expected=$EXPECTED" >> "$GITHUB_OUTPUT"
+          echo "actual=$ACTUAL" >> "$GITHUB_OUTPUT"
+          if [ "$ACTUAL" = "$EXPECTED" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "PR carries '$EXPECTED', which is what its commits entitle it to."
           else
-            echo "ok=false" >> $GITHUB_OUTPUT
-            echo "::warning::PR has no version-resolvable label; its title type maps to nothing."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::error::label is '${ACTUAL:-none}' but these commits entitle this PR to '$EXPECTED'."
           fi
 
-      - name: Suggest a title type from the commits
+      - name: Say what the title should be, then fail
         if: steps.check.outputs.ok == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
+          EXPECTED: ${{ steps.check.outputs.expected }}
+          ACTUAL: ${{ steps.check.outputs.actual }}
         run: |
-          gh api --paginate "repos/$GH_REPO/pulls/$PR/commits" \
-            --jq '.[].commit.message | split("\n")[0]' > subjects.txt
           WIN=$(python3 scripts/commit_summary.py --mode winning --subjects subjects.txt)
-          python3 - "$WIN" > comment.md <<'PYS'
-          import importlib.util, pathlib, sys
+          python3 - "$WIN" "$EXPECTED" "${ACTUAL:-none}" > comment.md <<'PYS'
+          import importlib.util, sys
           spec = importlib.util.spec_from_file_location("cs", "scripts/commit_summary.py")
           cs = importlib.util.module_from_spec(spec); spec.loader.exec_module(cs)
           title, category, bump = cs.SUGGESTIONS[sys.argv[1]]
+          expected, actual = sys.argv[2], sys.argv[3]
           print(f"""<!-- pr-title-check -->
-          ### This PR's title can't be labelled
+          ### This PR's label does not match its commits
 
-          The autolabeler maps the title to a label, release-drafter turns that label into a
-          release category, and the version gate resolves the expected bump from it. This
-          title matches none of its rules, so the PR has no label, won't appear in the draft
-          release notes, and gives the version gate nothing to check.
+          Label carried: **{actual}** — label its commits entitle it to: **{expected}**.
 
-          `lint_pr` passed because it accepts the full Conventional Commits set — `revert:`
-          is the type that clears the lint and still maps to nothing.
+          The label is applied from the TITLE, and it decides the release category and the
+          version bump. When the title understates the commits the change ships under the
+          wrong heading with the wrong bump — a breaking change released as a patch is the
+          case this exists to stop.
 
-          **Suggested type, from this PR's commits: {title}** — files under
-          *{category}*, resolves a **{bump}** bump.
+          **Retitle as {title}** — files under *{category}*, resolves a **{bump}** bump.
 
-          Mapped types: `feat`/`feature` · `fix` · `chore`/`docs`/`refactor`/`perf`/`test`/`build`/`ci`/`style` · any `type!:` for breaking.
-
-          Edit the title and this comment will remove itself. Nothing here changes your title.""".replace(chr(10) + " " * 10, chr(10)))
+          Fix the title and this check goes green; the comment removes itself. Nothing here
+          edits your title, and hand-patching the label will not help — the autolabeler
+          rewrites it from the title on the next push.""".replace(chr(10) + " " * 10, chr(10)))
           PYS
           EXISTING=$(gh api "repos/$GH_REPO/issues/$PR/comments" \
             --jq '[.[] | select(.body | startswith("<!-- pr-title-check -->"))] | .[0].id // ""')
@@ -155,8 +173,10 @@ jobs:
           else
             gh pr comment "$PR" --body-file comment.md
           fi
+          # The comment is the explanation; this is the gate.
+          exit 1
 
-      - name: Withdraw the suggestion once the title is fixed
+      - name: Withdraw the suggestion once the label is right
         if: steps.check.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -168,87 +188,19 @@ jobs:
           [ -n "$EXISTING" ] && gh api -X DELETE "repos/$GH_REPO/issues/comments/$EXISTING" --silent \
             && echo "removed the stale suggestion" || echo "nothing to withdraw"
 
-  # ---------------------------------------------------------- version-gate ----
-  # Reads labels to derive the expected bump, so it must follow `label` too.
-  version-gate:
-    name: Version validation
-    needs: label
-    if: github.event.pull_request.user.login != 'dependabot[bot]'
-    runs-on: ubuntu-latest
-    env:
-      PLUGIN_MANIFEST: plugins/ha/.claude-plugin/plugin.json
-      MARKETPLACE: .claude-plugin/marketplace.json
-      PLUGIN_NAME: ha
-    steps:
-      # BASE, not the PR head: the token is writable under pull_request_target.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          persist-credentials: false
-
-      - name: Gather versions and labels
-        id: gather
+      # No version is declared anywhere in this repo — Claude Code resolves the plugin
+      # version from the commit SHA — so there is nothing to gate. What the merged labels
+      # imply for the NEXT release tag is still worth saying, so a release cut on the wrong
+      # number is visible beforehand.
+      - name: Say what version this PR implies
+        if: steps.check.outputs.ok == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EXPECTED: ${{ steps.check.outputs.expected }}
         run: |
-          # The PR's manifests are read as DATA over the API — never checked out.
-          gh api "repos/$GH_REPO/contents/$PLUGIN_MANIFEST?ref=$HEAD_SHA" --jq '.content' \
-            | base64 -d > pr_plugin.json
-          gh api "repos/$GH_REPO/contents/$MARKETPLACE?ref=$HEAD_SHA" --jq '.content' \
-            | base64 -d > pr_marketplace.json
-          echo "pr_version=$(jq -r '.version' pr_plugin.json)" >> "$GITHUB_OUTPUT"
-          echo "pr_mp_version=$(jq -r --arg n "$PLUGIN_NAME" '.plugins[]|select(.name==$n)|.version' pr_marketplace.json)" >> "$GITHUB_OUTPUT"
-          # manifest_gate.py compares against the last PUBLISHED release and uses the
-          # base branch's version only as a ceiling. The previous inline gate compared
-          # against the base branch alone, so these names differ; emitting the old
-          # `base_version` here left both gate inputs empty and it evaluated against
-          # 0.0.0.
-          echo "main_version=$(jq -r '.version' "$PLUGIN_MANIFEST")" >> "$GITHUB_OUTPUT"
           TAG=$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName')
-          echo "last_release=${TAG#v}" >> "$GITHUB_OUTPUT"
-          echo "labels=$(gh pr view "$PR" --json labels -q '[.labels[].name]|join(",")')" >> "$GITHUB_OUTPUT"
-
-      # Decision logic in Python, not inline bash: an untested inline gate shipped a
-      # real bug once (strict equality rejected a valid in-cycle version).
-      # Untrusted values reach it via env, never `${{ }}` inside run:.
-      # This repo carries the version in two files. manifest_gate.py is deliberately
-      # single-version (an HA integration has one manifest.json), so the agreement
-      # check lives here rather than diverging the shared gate step.
-      - name: Manifests agree
-        env:
-          PR_VERSION: ${{ steps.gather.outputs.pr_version }}
-          PR_MP_VERSION: ${{ steps.gather.outputs.pr_mp_version }}
-        run: |
-          if [ "$PR_VERSION" != "$PR_MP_VERSION" ]; then
-            echo "::error::plugin.json ($PR_VERSION) != marketplace.json ($PR_MP_VERSION). Bump both together."
-            exit 1
-          fi
-
-      - name: Version gate
-        # Via env, never `${{ }}` inside run: `pr_version` is read from the PR's own
-        # manifest.json, so a fork PR controls that string entirely. Interpolated into
-        # the command line it would be shell injection against a writable token.
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          LAST_RELEASE: ${{ steps.gather.outputs.last_release }}
-          MAIN_VERSION: ${{ steps.gather.outputs.main_version }}
-          PR_VERSION: ${{ steps.gather.outputs.pr_version }}
-          LABELS: ${{ steps.gather.outputs.labels }}
-        run: |
-          # The count is computed here, not in manifest_gate.py: the gate runs from
-          # the trusted base checkout and must not run `git log` over PR-controlled
-          # refs. `gh` returns data only, and jq emits an integer.
-          BRK=$(gh pr view "$PR_NUMBER" --json commits \
-                --jq '[.commits[].messageHeadline | select(test("^[a-zA-Z]+(\\([^)]*\\))?!:"))] | length')
           python3 scripts/manifest_gate.py \
-            --last-release "$LAST_RELEASE" \
-            --main-version "$MAIN_VERSION" \
-            --pr-version "$PR_VERSION" \
-            --labels "$LABELS" \
-            --breaking-commits "$BRK"
-
+            --last-release "${TAG#v}" \
+            --labels "$EXPECTED" \
+            --suggest >> "$GITHUB_STEP_SUMMARY"

@@ -1,4 +1,4 @@
-# pineapple-claude-hacs
+# ha-skills
 
 An installable [Claude Code](https://claude.com/claude-code) plugin for building **Home
 Assistant custom integrations**, with the CI templates those repos need.
@@ -28,11 +28,11 @@ acting, because these APIs move and memory goes stale.
 Add this repo as a marketplace and install the plugin from inside Claude Code:
 
 ```
-/plugin marketplace add PineappleEmperor/pineapple-claude-hacs
-/plugin install ha@pineapple-claude-hacs
+/plugin marketplace add PineappleEmperor/ha-skills
+/plugin install ha@ha-skills
 ```
 
-Update later with `/plugin marketplace update pineapple-claude-hacs`.
+Update later with `/plugin marketplace update ha-skills`.
 
 ### Without the plugin system
 
@@ -40,9 +40,9 @@ Symlink the `SKILL.md` files into your commands directory to get plain
 `/ha-integration` and `/ha-panel-design`:
 
 ```bash
-git clone git@github.com:PineappleEmperor/pineapple-claude-hacs.git
-ln -s "$PWD/pineapple-claude-hacs/plugins/ha/skills/ha-integration/SKILL.md"  ~/.claude/commands/ha-integration.md
-ln -s "$PWD/pineapple-claude-hacs/plugins/ha/skills/ha-panel-design/SKILL.md" ~/.claude/commands/ha-panel-design.md
+git clone git@github.com:PineappleEmperor/ha-skills.git
+ln -s "$PWD/ha-skills/plugins/ha/skills/ha-integration/SKILL.md"  ~/.claude/commands/ha-integration.md
+ln -s "$PWD/ha-skills/plugins/ha/skills/ha-panel-design/SKILL.md" ~/.claude/commands/ha-panel-design.md
 ```
 
 That gets you the guidance without the templates. When it needs them the skill asks where

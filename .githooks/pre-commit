@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Audit and fix are separate passes. An audit ADDS rows to docs/backlog.md; a later pass
+# CLEARS them, one issue per commit. A commit that does both buries the finding inside the
+# change, so nothing records what the fix was for — and the next audit rediscovers it.
+# Enable once per clone: git config core.hooksPath .githooks
+#
+# Deliberately no escape hatch. The failure this prevents is not lack of permission, it is
+# the temptation to fold "while I was here" into a findings commit.
+files="$(git diff --cached --name-only --diff-filter=ACMRD)"
+
+has_backlog=0
+others=""
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  if [ "$f" = "docs/backlog.md" ]; then
+    has_backlog=1
+  else
+    others="$others
+    $f"
+  fi
+done <<EOF
+$files
+EOF
+
+if [ "$has_backlog" -eq 1 ] && [ -n "$others" ]; then
+  echo "pre-commit: docs/backlog.md must be committed on its own." >&2
+  echo "    An audit adds rows; a later pass clears them, one issue per commit." >&2
+  echo "    Also staged:$others" >&2
+  echo "    Unstage the rest, or commit the backlog rows separately first." >&2
+  exit 1
+fi
+exit 0

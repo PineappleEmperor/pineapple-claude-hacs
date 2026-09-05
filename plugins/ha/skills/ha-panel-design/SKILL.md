@@ -112,6 +112,11 @@ dimension, then name. State the sort in a hint if non-obvious.
 
 ## Panels built from a source bundle
 
+The full contract for shipping a panel from an integration — the bundle staleness check,
+cache-busting the module URL, and the `home-assistant-frontend` pin, each of which fails
+silently — is `ha-integration/reference/panels.md`. What follows is only
+what a design change must not break.
+
 - One Lit/TS source file builds to a committed bundle the integration serves; CI diffs the
   committed artefact against a fresh build, so rebuild and commit in the same PR. The built
   file is display-only — never hand-edit it.

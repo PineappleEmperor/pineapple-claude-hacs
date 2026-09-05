@@ -1,9 +1,13 @@
 name: Dependency Review
 
 # Blocks a PR that introduces a dependency with a known advisory. Runs on the PR's
-# own diff, so it costs nothing on branches that touch no dependencies. Free on
-# public repos; on a private repo without Advanced Security the action exits with a
-# clear message rather than failing the PR.
+# own diff, so it costs nothing on branches that touch no dependencies.
+#
+# REQUIRES the repository's dependency graph to be enabled (Settings -> Advanced
+# Security -> Dependency graph). Without it the action does NOT skip — it fails the
+# check, so a repo that never enabled the graph gets a permanently red required check.
+# Verified on a test repo with the graph off: this check failed while every other
+# workflow passed. `scripts/bootstrap_repo.sh` enables it as part of repo setup.
 on:
   pull_request:
 

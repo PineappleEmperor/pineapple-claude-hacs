@@ -1,0 +1,97 @@
+name: Panel Bundle
+
+# The panel's TypeScript is reachable from nothing else in the stack: `tsc --noEmit`
+# proves a helper returns a string, not the right one, and the Python suite cannot see
+# it at all. This runs the type-check and the unit tests so that logic is covered on the
+# PR that changes it.
+#
+# It deliberately does NOT gate on the committed bundle being fresh. `release.yml`
+# rebuilds the bundle immediately before packing the zip, so what users install is always
+# a fresh build — a stale committed bundle is repo hygiene, not a release defect, and it
+# is reported as a warning there. Gating on it here blocked merges over a build artefact.
+#
+# Path-filtered on purpose: it has nothing to say about a Python-only PR. That also means
+# it must not be a required status check — a required context that never reports on an
+# unrelated PR leaves that PR unmergeable forever.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - 'custom_components/*/panel/**'
+      - '.github/workflows/panel_bundle.yml'
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - 'custom_components/*/panel/**'
+      - '.github/workflows/panel_bundle.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Panel type-check and tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The path filter names this file, so the one run a repo with no panel ever sees
+      # is the one that lands the workflow — and that run died at setup-node's cache step
+      # below, on a lock file that does not exist. Every step below is gated on the panel's
+      # manifest; a job-level `if` cannot see files, a step-level one can.
+      - name: Nothing to check without a panel
+        if: hashFiles('frontend/package.json') == ''
+        working-directory: .
+        run: echo "::notice::no frontend/ in this repo; the panel checks have nothing to run on"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: hashFiles('frontend/package.json') != ''
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        if: hashFiles('frontend/package.json') != ''
+        run: npm ci
+
+      - name: Type-check
+        if: hashFiles('frontend/package.json') != ''
+        run: npm run check
+
+      - name: Unit tests
+        if: hashFiles('frontend/package.json') != ''
+        run: |
+          # find, not a glob: bash `**` does not recurse without globstar, and `ls`
+          # on a non-matching pattern errors rather than reporting "none".
+          if [ -z "$(find src test -name '*.test.ts' -o -name '*.spec.ts' 2>/dev/null)" ]; then
+            echo "::warning::no frontend test files - the panel's presentation logic is unproven"
+          fi
+          npm test
+
+      # Proves the source still builds. The artefact is discarded: release.yml builds the
+      # bundle that actually ships.
+      - name: Build
+        if: hashFiles('frontend/package.json') != ''
+        run: npm run build
+
+      # Reported on the PR that caused it, not enforced. Blocking a merge on a build
+      # artefact was the old behaviour and it stopped real work; leaving it silent until
+      # release meant finding out late. A warning here is the middle: you learn on the PR,
+      # and users are protected regardless because release.yml rebuilds before packing.
+      - name: Say whether the committed bundle is stale
+        if: hashFiles('frontend/package.json') != ''
+        working-directory: .
+        run: |
+          if git diff --quiet -- 'custom_components/*/panel/*.js'; then
+            echo "::notice::committed panel bundle matches a fresh build"
+          else
+            echo "::warning::the committed panel bundle is stale — run 'npm run build' in frontend/ and commit the result. This does not block the merge; release.yml rebuilds before packing the zip."
+          fi

@@ -18,9 +18,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # Only the types the autolabeler maps. The full Conventional Commits set
-          # lets `revert:` through, which then carries no label, no release category
-          # and nothing for the version to resolve from.
           # Every type the autolabeler maps, and only those. `revert:` is the one
           # the spec allows that maps to no label, so it would leave a PR with no
           # release category and nothing for the version to resolve from.

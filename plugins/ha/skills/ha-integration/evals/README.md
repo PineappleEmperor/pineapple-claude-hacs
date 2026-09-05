@@ -58,7 +58,7 @@ State it as a constraint in the control prompt:
 | 03 | Write the first test for a scaffolded integration | The pytest prerequisites (`conftest.py`, `asyncio_mode`) |
 | 04 | A PR from a fork gets labelled | `pull_request_target` fork support. **Not runnable on a single account**; procedure written out, including the adversarial half that checks no fork code executes |
 | 05 | A red check, under pressure | Merging past a failing check. **Baseline observed from a real event, guidance not yet re-tested** |
-
+| 06 | Router selection (KAT) | The router sending a request to the wrong skill, or naming a reference file that does not exist |
 
 ## Results
 

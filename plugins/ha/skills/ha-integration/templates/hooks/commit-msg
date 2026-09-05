@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Enforce terse commits: subject <=72 chars, no narrative body, no AI-attribution trailers.
-# Body lines allowed only as trailers (Key: value), Closes/Refs/Fixes #N, or any body when a
-# BREAKING CHANGE footer is present. Enable once per clone: git config core.hooksPath .githooks
+# Enforces the commit rules in the ha-integration skill's reference/commits.md.
+# Enable once per clone: git config core.hooksPath .githooks
 msg_file="$1"
 subject="$(grep -v '^#' "$msg_file" | sed -n '1p')"
 
@@ -11,10 +10,7 @@ if [ "${#subject}" -gt 72 ]; then
 fi
 case "$subject" in "Merge "*|"Revert "*|"fixup! "*|"squash! "*) exit 0 ;; esac
 
-# The subject must be a Conventional Commit: a mapped type, lowercase after the colon,
-# one imperative clause, no trailing period. lint_pr enforces this on the PR title; the
-# release notes are built from these subjects, so an unmapped one lands in the wrong
-# section of what users read.
+# Subject shape.
 if ! printf '%s' "$subject" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._/-]+\))?!?: [a-z]'; then
   echo "commit-msg: subject must be '<type>(<scope>)!: <lowercase imperative>'" >&2
   echo "    types: feat fix docs style refactor perf test build ci chore revert" >&2
@@ -22,24 +18,30 @@ if ! printf '%s' "$subject" | grep -Eq '^(feat|fix|docs|style|refactor|perf|test
 fi
 case "$subject" in *.) echo "commit-msg: subject must not end in a period." >&2; exit 1 ;; esac
 
-# Editorialising words. A subject can pass every shape rule above and still say nothing
-# a reader can act on — "catch prose naming a job nobody ships" is well formed, and does
-# not name the thing it changed. These words are where that creeps in.
+# An `and` after the colon.
+if printf '%s' "$subject" | sed 's/^[^:]*: //' | grep -Eqw 'and'; then
+  echo "commit-msg: one change per commit — this subject joins two with 'and'. Split it." >&2
+  echo "    $subject" >&2
+  exit 1
+fi
+
+# Editorialising words.
 if printf '%s' "$subject" | grep -Eqi '\b(actually|really|properly|simply|just|finally|nobody|somehow|stuff|magic|nice)\b'; then
   echo "commit-msg: editorialising subject — say what changed, not how you feel about it." >&2
   echo "    $subject" >&2
   exit 1
 fi
 
-# Reject harness-injected AI-attribution trailers (this skill bans them). A real human
-# Co-Authored-By is still fine.
+# AI-attribution trailers; a human Co-Authored-By passes.
 if grep -v '^#' "$msg_file" | grep -Eqi '^Co-authored-by:[[:space:]]*Claude|^Claude-Session:|Generated with .*(Claude|Anthropic)'; then
   echo "commit-msg: AI-attribution trailer not allowed (strip Co-Authored-By: Claude / Claude-Session)." >&2
   exit 1
 fi
 
-if grep -q 'BREAKING CHANGE' "$msg_file"; then
-  exit 0
+# Breaking-change footers.
+if grep -v '^#' "$msg_file" | grep -Eqi '^BREAKING[ -]CHANGE:'; then
+  echo "commit-msg: a BREAKING CHANGE footer is read by nothing here. Mark the subject '<type>!:' instead." >&2
+  exit 1
 fi
 
 bad=""

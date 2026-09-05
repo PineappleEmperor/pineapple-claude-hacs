@@ -21,7 +21,9 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: '3.13'
+          # The shipped tooling runs under HA's floor Python in every scaffold, so it is
+          # tested under the same one here. pyproject.toml's target-version must agree.
+          python-version: '3.14'
       # uv for the same reason the template uses it: the install is the slow part
       # of this job, and the cache key covers what decides the dependency set.
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -31,5 +33,10 @@ jobs:
       # PyYAML because skill_audit.py parses workflows, and the tests import it.
       # A local venv that happens to have it installed hides this; the job must
       # name every import the suite reaches.
-      - run: uv pip install --system --quiet pytest pyyaml
+      - run: uv pip install --system --quiet pytest pyyaml ruff
+      # scripts/ and tests/ ship to every scaffolded repo, whose CI lints and format-
+      # checks them under the shipped pyproject.toml; they must pass the same here.
+      # This repo's pyproject.toml carries the same ruff tables.
+      - run: ruff check .
+      - run: ruff format --check .
       - run: python -m pytest tests/ -q

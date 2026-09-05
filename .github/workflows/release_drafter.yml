@@ -26,31 +26,39 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
+      # The shipped scripts are written to the Python floor the whole stack declares
+      # (pyproject.toml, pyrightconfig.json, python_validate.yml). The runner's own
+      # python3 is older and rejected their syntax; version_sync.py holds every
+      # workflow's python-version to that floor.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+      # The version comes from the merged PRs, not from a file. Each PR's label carries
+      # a semver-increment and the highest since the last release wins — the same model
+      # the templates ship. `sync_plugin_version.yml` writes the number back to the
+      # manifests when the release publishes, so nothing here reads them.
+      - uses: release-drafter/release-drafter@34d80673e067bdc0c24568d3af899c216adcfaa9 # v7.7.0
+        id: drafter
+        if: github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - id: ver
-        name: Read version from plugin manifest
+        name: Resolve the version being released
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RESOLVED: ${{ steps.drafter.outputs.resolved_version }}
         run: |
           if [ -n "$RELEASE_TAG" ]; then
             V="${RELEASE_TAG#v}"
           else
-            V=$(python3 -c "import json;print(json.load(open('plugins/ha/.claude-plugin/plugin.json'))['version'])")
+            V="$RESOLVED"
+          fi
+          if [ -z "$V" ]; then
+            echo "::error::no version resolved; a PR label with a semver-increment is required"
+            exit 1
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          if echo "$V" | grep -Eiq '[0-9][-._]?(rc|alpha|beta|dev|a|b)'; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
-      - uses: release-drafter/release-drafter@34d80673e067bdc0c24568d3af899c216adcfaa9 # v7.7.0
-        if: github.event_name == 'push'
-        with:
-          version: ${{ steps.ver.outputs.version }}
-          tag: v${{ steps.ver.outputs.version }}
-          name: v${{ steps.ver.outputs.version }}
-          prerelease: ${{ steps.ver.outputs.prerelease }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # release-drafter categorises by PR LABEL, one entry per PR, so a fix inside a
       # feat-titled PR files under Features. Surveyed HACS repos all group by the
@@ -73,8 +81,7 @@ jobs:
           # Excluding the release being written matters on `release: published`,
           # where it is already the newest non-draft and would otherwise match itself.
           PREV=$(gh release list --exclude-drafts --limit 30 --json tagName,isPrerelease \
-            --jq '.[] | select(.isPrerelease == false) | .tagName' \
-            | grep -vx "v$V" | head -1)
+            --jq 'map(select(.isPrerelease == false and .tagName != "v" + env.V)) | .[0].tagName // ""')
           # A repo's first release has no previous tag, so the range would be `..HEAD`
           # and every commit would be missed. Fall back to the root commit; the compare
           # link is dropped with it, since there is nothing to compare against.
@@ -85,25 +92,13 @@ jobs:
             RANGE="$(git rev-list --max-parents=0 HEAD | tail -1)..HEAD"
             PREV_ARG=()
           fi
-          # Two drafts are kept alive: the full release and its next rc. Shipping
-          # either is publishing it — no dispatch, no token, and going rc -> final
-          # never means building a release from scratch. The rc draft is reused
-          # while it stays unpublished, so rc numbers track published candidates
-          # rather than incrementing on every push.
-          # Draft tags are built from the BASE version, never from $V. When the newest
-          # release is a prerelease, release-drafter resolves the version as that
-          # prerelease — 0.1.0rc1 — and appending the rc suffix produced v0.1.0rc1rc1.
-          BASE_V=$(printf '%s' "$V" | sed -E 's/(rc|alpha|beta|a|b)[0-9]*$//I')
-          gh release view "v$BASE_V" >/dev/null 2>&1 \
-            || gh release create "v$BASE_V" --draft --title "v$BASE_V" --notes "pending"
-          RC_TAG=$(gh release list --limit 50 --json tagName,isDraft \
-            --jq "[.[] | select(.isDraft and (.tagName | startswith(\"v${BASE_V}rc\"))) | .tagName] | first // empty")
-          if [ -z "$RC_TAG" ]; then
-            N=1
-            while gh release view "v${BASE_V}rc${N}" >/dev/null 2>&1; do N=$((N + 1)); done
-            RC_TAG="v${BASE_V}rc${N}"
-            gh release create "$RC_TAG" --draft --prerelease --title "$RC_TAG" --notes "pending"
-          fi
+          # One draft, not two. A scaffolded integration keeps an rc draft beside the
+          # full one because HACS users test candidates; a plugin marketplace ships
+          # what main holds, so a candidate has nobody to test it. Publishing this
+          # draft is the release, and `sync_plugin_version.yml` writes its tag back
+          # into the manifests.
+          gh release view "v$V" >/dev/null 2>&1 \
+            || gh release create "v$V" --draft --title "v$V" --notes "pending"
           # New Contributors comes from GitHub's own generator, because "first
           # contribution" is its definition and reimplementing it would drift. This
           # endpoint only renders a body; it does not touch the release.
@@ -115,23 +110,7 @@ jobs:
             --repo-url "https://github.com/$GH_REPO" \
             "${PREV_ARG[@]}" --version "$V" \
             --github-notes-file gh_notes.md > notes.md
-          # On a release event "v$V" is the release being published; on a push it is
-          # the full draft, which is "v$BASE_V" anyway.
           gh release edit "v$V" --notes-file notes.md
-          [ "v$V" = "v$BASE_V" ] || gh release edit "v$BASE_V" --notes-file notes.md
-          gh release edit "$RC_TAG" --notes-file notes.md
-
-          # A published final supersedes its own drafts. Left behind, the rc draft
-          # reappears in the release list for a version that already shipped, and the
-          # next push would keep updating it.
-          if [ -n "${RELEASE_TAG:-}" ] && ! echo "$V" | grep -Eiq 'rc[0-9]*$'; then
-            gh release list --limit 50 --json tagName,isDraft \
-              --jq ".[] | select(.isDraft and (.tagName | startswith(\"v${BASE_V}\"))) | .tagName" \
-              | while read -r stale; do
-                  echo "::notice::removing superseded draft $stale"
-                  gh release delete "$stale" --yes
-                done
-          fi
 
       # The release description is what users read, and nothing checked it. Every
       # earlier verification of the commit-summary block looked at the source text
@@ -140,6 +119,6 @@ jobs:
       - name: Release notes render correctly
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          V: ${{ steps.ver.outputs.version }}
         run: |
-          python3 scripts/check_release_notes.py --tag "v${{ steps.ver.outputs.version }}" \
-            --version "${{ steps.ver.outputs.version }}"
+          python3 scripts/check_release_notes.py --tag "v$V" --version "$V"
